@@ -1,0 +1,49 @@
+{
+  "users": {
+    "1254322753": {
+      "quota": 19,
+      "last_checkin_date": "2026-01-03"
+    },
+    "1987561642": {
+      "quota": 5,
+      "last_checkin_date": "2026-03-11"
+    },
+    "1365891910": {
+      "quota": 3,
+      "last_checkin_date": "2026-01-29"
+    },
+    "2708583339": {
+      "quota": 3,
+      "last_checkin_date": "2026-02-27"
+    },
+    "2624528770": {
+      "quota": 1,
+      "last_checkin_date": "2026-03-11"
+    },
+    "2372613706": {
+      "quota": 0,
+      "last_checkin_date": "2026-03-11"
+    },
+    "66715651": {
+      "quota": 5,
+      "last_checkin_date": "2026-03-15"
+    },
+    "2980781300": {
+      "quota": 5,
+      "last_checkin_date": "2026-03-14"
+    },
+    "732388386": {
+      "quota": 3,
+      "last_checkin_date": "2026-03-14"
+    },
+    "2014456684": {
+      "quota": 3,
+      "last_checkin_date": "2026-03-14"
+    }
+  },
+  "whitelist": [
+    "2014456684",
+    "1254322753"
+  ],
+  "blacklist": []
+}
