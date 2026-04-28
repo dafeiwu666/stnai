@@ -4,5 +4,5 @@ display_name: 砂糖绘画
 desc: 砂糖绘画：基于 NovelAI 的绘图插件，具有强大的文生图/图生图、氛围转移、角色保持、AI 辅助生图、自动画图、队列与额度管理能力。
 version: v0.1.0
 author: LgCookie&etgpao&feiu
-repo: https://github.com/dafeiwu666
+repo: https://github.com/dafeiwu666/stnai
 
