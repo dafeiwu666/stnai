@@ -124,13 +124,14 @@
       "default_prompt": {
         "default": "best quality, very aesthetic, absurdres",
         "description": "AI 自主画图时的默认正向提示词",
-        "hint": "AI 生成的提示词会与此默认提示词合并",
+        "hint": "仅作用于 AI 自主画图（nai画图 / 自动画图）路径，且仅在 AI 没有输出任何正向提示词时作为兜底使用（不是合并）。/nai 命令的默认正向提示词请在 `defaults.prompt` 中配置。",
         "title": "Default Prompt",
         "type": "text"
       },
       "default_negative_prompt": {
         "default": "blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, multiple views, logo, too many watermarks",
         "description": "AI 自主画图时的默认反向提示词",
+        "hint": "仅作用于 AI 自主画图（nai画图 / 自动画图）路径，且仅在 AI 没有输出任何反向提示词时作为兜底使用（不是合并）。/nai 命令的默认反向提示词请在 `defaults.negative_prompt` 中配置。",
         "title": "Default Negative Prompt",
         "type": "text"
       },
@@ -291,6 +292,7 @@
       "model": "nai-diffusion-4-5-full",
       "prompt": "best quality, very aesthetic, absurdres",
       "negative_prompt": "blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, multiple views, logo, too many watermarks",
+      "default_preset": "",
       "size": "832x1216",
       "portrait_size": "832x1216",
       "landscape_size": "1216x832",
@@ -327,15 +329,23 @@
       "prompt": {
         "default": "best quality, very aesthetic, absurdres",
         "description": "默认正向提示词",
-        "hint": "使用 nai 命令时的默认正向提示词",
+        "hint": "仅作用于 /nai 手动命令路径，且仅在用户未填写任何正向提示词（tag/前置/后置）时作为兜底使用。AI 自主画图（nai画图 / 自动画图）的默认正向提示词请在 `llm.default_prompt` 中配置。",
         "title": "Prompt",
         "type": "text"
       },
       "negative_prompt": {
         "default": "blurry, lowres, error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, multiple views, logo, too many watermarks",
         "description": "默认反向提示词",
+        "hint": "仅作用于 /nai 手动命令路径，且仅在用户未填写任何反向提示词时作为兜底使用。AI 自主画图（nai画图 / 自动画图）的默认反向提示词请在 `llm.default_negative_prompt` 中配置。",
         "title": "Negative Prompt",
         "type": "text"
+      },
+      "default_preset": {
+        "default": "",
+        "description": "默认预设（按预设标题填写）",
+        "hint": "在 /nai、/nai画图、/nai自动画图开、/nai自动画图 这四条入口里，若用户没有显式指定 s1=/s2= 等预设参数，则自动套用该默认预设。留空表示不启用；填写的预设若不存在则静默跳过（仅记录 warning），不影响命令本身。",
+        "title": "Default Preset",
+        "type": "string"
       },
       "size": {
         "default": "832x1216",

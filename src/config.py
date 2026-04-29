@@ -133,7 +133,11 @@ class LLMConfig(BaseModel):
             description="AI 自主画图时的默认正向提示词",
             json_schema_extra={
                 "type": "text",
-                "hint": "AI 生成的提示词会与此默认提示词合并",
+                "hint": (
+                    "仅作用于 AI 自主画图（nai画图 / 自动画图）路径，"
+                    "且仅在 AI 没有输出任何正向提示词时作为兜底使用（不是合并）。"
+                    "/nai 命令的默认正向提示词请在 `defaults.prompt` 中配置。"
+                ),
             },
         ),
     ] = DEFAULT_PREPEND_PROMPT
@@ -141,7 +145,14 @@ class LLMConfig(BaseModel):
         str,
         Field(
             description="AI 自主画图时的默认反向提示词",
-            json_schema_extra={"type": "text"},
+            json_schema_extra={
+                "type": "text",
+                "hint": (
+                    "仅作用于 AI 自主画图（nai画图 / 自动画图）路径，"
+                    "且仅在 AI 没有输出任何反向提示词时作为兜底使用（不是合并）。"
+                    "/nai 命令的默认反向提示词请在 `defaults.negative_prompt` 中配置。"
+                ),
+            },
         ),
     ] = DEFAULT_NEGATIVE_PROMPT
     allow_i2i: Annotated[bool, Field(description="允许 AI 使用图生图功能")] = True
@@ -269,7 +280,11 @@ class DefaultsConfig(BaseModel):
             description="默认正向提示词",
             json_schema_extra={
                 "type": "text",
-                "hint": "使用 nai 命令时的默认正向提示词",
+                "hint": (
+                    "仅作用于 /nai 手动命令路径，"
+                    "且仅在用户未填写任何正向提示词（tag/前置/后置）时作为兜底使用。"
+                    "AI 自主画图（nai画图 / 自动画图）的默认正向提示词请在 `llm.default_prompt` 中配置。"
+                ),
             },
         ),
     ] = DEFAULT_PREPEND_PROMPT
@@ -277,9 +292,29 @@ class DefaultsConfig(BaseModel):
         str,
         Field(
             description="默认反向提示词",
-            json_schema_extra={"type": "text"},
+            json_schema_extra={
+                "type": "text",
+                "hint": (
+                    "仅作用于 /nai 手动命令路径，"
+                    "且仅在用户未填写任何反向提示词时作为兜底使用。"
+                    "AI 自主画图（nai画图 / 自动画图）的默认反向提示词请在 `llm.default_negative_prompt` 中配置。"
+                ),
+            },
         ),
     ] = DEFAULT_NEGATIVE_PROMPT
+    default_preset: Annotated[
+        str,
+        Field(
+            description="默认预设（按预设标题填写）",
+            json_schema_extra={
+                "hint": (
+                    "在 /nai、/nai画图、/nai自动画图开、/nai自动画图 这四条入口里，"
+                    "若用户没有显式指定 s1=/s2= 等预设参数，则自动套用该默认预设。"
+                    "留空表示不启用；填写的预设若不存在则静默跳过（仅记录 warning），不影响命令本身。"
+                ),
+            },
+        ),
+    ] = ""
     size: Annotated[
         str,
         Field(

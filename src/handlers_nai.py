@@ -36,6 +36,7 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
 
     raw_input = event.message_str.removeprefix("nai画图").strip()
     preset_names, other_params = plugin._parse_presets_from_params(raw_input)
+    preset_names = plugin._apply_default_preset_to_names(preset_names)
 
     description = other_params.get("ds", "")
 
