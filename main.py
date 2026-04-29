@@ -377,6 +377,23 @@ class Plugin(Star):
         self._token_index = (self._token_index + 1) % len(tokens)
         return token
 
+    def _apply_default_preset_to_names(self, preset_names: list[str]) -> list[str]:
+        """若用户未显式指定 sN= 预设，则套用 defaults.default_preset 配置的默认预设。
+
+        默认预设未配置或预设不存在时，保持原样并记录 warning（静默降级）。
+        """
+        if preset_names:
+            return preset_names
+        default_preset_name = (self.config.defaults.default_preset or "").strip()
+        if not default_preset_name:
+            return preset_names
+        if self.preset_manager.get_preset(default_preset_name) is None:
+            logger.warning(
+                f"[nai] defaults.default_preset 配置的预设 #{default_preset_name} 不存在，已跳过"
+            )
+            return preset_names
+        return [default_preset_name]
+
     async def _run_with_retry(self, func):
         """内部重试包装器（不外显）。
 
@@ -509,7 +526,30 @@ class Plugin(Star):
             else:
                 # 强制键值对格式，不接受无等号的行
                 raise ValueError(f"参数格式错误：'{line}'，请使用键值对格式，例如：tag=xxx")
-        
+
+        # 用户未显式指定 sN=，且 defaults.default_preset 配置了存在的预设时，自动套用
+        if not preset_numbers:
+            default_preset_name = (self.config.defaults.default_preset or "").strip()
+            if default_preset_name:
+                preset = self.preset_manager.get_preset(default_preset_name)
+                if preset is None:
+                    logger.warning(
+                        f"[nai] defaults.default_preset 配置的预设 #{default_preset_name} 不存在，已跳过"
+                    )
+                else:
+                    preset_params: list[tuple[str, str]] = []
+                    for pl in preset.content.split('\n'):
+                        pl = pl.strip()
+                        if not pl:
+                            continue
+                        if '=' in pl:
+                            pk, pv = pl.split('=', 1)
+                            preset_params.append((pk.strip(), pv.strip()))
+                        else:
+                            preset_params.append(('tag', pl))
+                    preset_numbers.append(1)
+                    preset_params_list.append(preset_params)
+
         # 按预设编号排序（1, 2, 3, ...）
         sorted_presets = sorted(zip(preset_numbers, preset_params_list), key=lambda x: x[0])
         
