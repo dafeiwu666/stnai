@@ -11,6 +11,7 @@ from pydantic import (
     ConfigDict,
     Field,
     RootModel,
+    model_serializer,
 )
 
 AVAILABLE_MODELS = [
@@ -147,6 +148,17 @@ class ReqAdditionCharacterKeep(BaseModel):  # 角色保持
     keep_vibe: bool = False  # 保持氛围
     strength: Annotated[float, Field(ge=0, le=1)] = 0.5  # 参考强度
 
+    # 服务端实际同时下发 `keep_vibe`（snake）和 `keepVibe`（camel）两份键，
+    # 这里复刻该行为以兼容服务端可能读取的任意一份。
+    @model_serializer(mode="wrap")
+    def _serialize_with_dual_keep_vibe(self, handler):
+        data = handler(self)
+        if "keepVibe" in data:
+            data["keep_vibe"] = data["keepVibe"]
+        elif "keep_vibe" in data:
+            data["keepVibe"] = data["keep_vibe"]
+        return data
+
 
 @model_with_model_config(REQ_MODEL_CONFIG)
 class ReqAddition(BaseModel):
@@ -194,8 +206,12 @@ class Req(BaseModel):
     other: Annotated[  # 高级配置
         str, AfterValidator(make_item_exists_validator(AVAILABLE_DOTH))
     ] = AVAILABLE_DOTH[0]
-    i2i_force: Annotated[str, Field(serialization_alias="i2iforce")] = "0.6"  # 重绘力度
-    i2i_cl: Annotated[str, Field(serialization_alias="i2icl")] = "1"  # 图片处理
+    varity: str = "0"  # 多样性开关（服务端新增字段）
+    decrisp: str = "0"  # 降锐/去清晰开关（服务端新增字段）
+    i2i_force: Annotated[str, Field(serialization_alias="i2i_force")] = "0.6"  # 重绘力度
+    i2i_cl: Annotated[str, Field(serialization_alias="i2i_cl")] = "1"  # 图片处理
+    git_token: Annotated[str, Field(serialization_alias="git_token")] = ""  # 服务端新增字段
+    git_repo: Annotated[str, Field(serialization_alias="git_repo")] = ""  # 服务端新增字段
     addition: ReqAddition = ReqAddition()
     ch: bool = False
     nocache: int = 1
