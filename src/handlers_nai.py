@@ -127,14 +127,19 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
 
         user_id = event.get_sender_id()
         user_name = event.get_sender_name()
-        nodes = Nodes([
-            Node(
-                uin=user_id,
-                name=user_name,
-                content=[Image.fromBytes(image)],
+        if plugin.config.general.merge_draw_to_chat_record:
+            nodes = Nodes(
+                [
+                    Node(
+                        uin=user_id,
+                        name=user_name,
+                        content=[Image.fromBytes(image)],
+                    )
+                ]
             )
-        ])
-        yield event.chain_result([nodes])
+            yield event.chain_result([nodes])
+        else:
+            yield event.chain_result([Image.fromBytes(image)])
     except ReturnToLLMError as e:
         yield event.plain_result(f"画图失败：{e}")
     except asyncio.CancelledError:
@@ -170,7 +175,7 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
     quota_enabled = plugin.config.quota.enable_quota
 
     try:
-        req = await plugin._parse_args(event, is_whitelisted)
+        parsed = await plugin._parse_args(event, is_whitelisted)
     except Exception as e:  # noqa: BLE001
         logger.debug("Failed to parse args", exc_info=e)
         yield event.plain_result(
@@ -178,7 +183,7 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
         )
         return
 
-    if req is None:
+    if parsed is None:
         help_msg = plugin.generate_help(event.unified_msg_origin)
         if plugin.config.general.help_t2i:
             try:
@@ -194,10 +199,18 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
             yield event.plain_result(help_msg)
         return
 
+    req, batch_count = parsed
+
     if quota_enabled and not is_whitelisted:
         can_use, reason = plugin.user_manager.can_use(user_id)
         if not can_use:
             yield event.plain_result(reason)
+            return
+        quota = plugin.user_manager.get_quota(user_id)
+        if quota < batch_count:
+            yield event.plain_result(
+                f"你的画图次数不足，当前剩余 {quota} 次，本次需要 {batch_count} 次"
+            )
             return
 
     res = await plugin._queue.reserve(
@@ -205,7 +218,7 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
         is_whitelisted=is_whitelisted,
         max_queue_size=plugin.config.request.max_queue_size,
         max_concurrent=plugin.config.request.max_concurrent,
-        consume_quota=(lambda: plugin.user_manager.consume_quota(user_id))
+        consume_quota=(lambda: plugin.user_manager.consume_quota_n(user_id, batch_count))
         if quota_enabled and not is_whitelisted
         else None,
     )
@@ -243,18 +256,26 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
                 req.token = token
                 return await wrapped_generate(req, plugin.config, token=token)
 
-            image = await plugin._run_with_retry(_do_generate)
+            images: list[bytes] = []
+            for _ in range(batch_count):
+                images.append(await plugin._run_with_retry(_do_generate))
 
         user_id = event.get_sender_id()
         user_name = event.get_sender_name()
-        nodes = Nodes([
-            Node(
-                uin=user_id,
-                name=user_name,
-                content=[Image.fromBytes(image)],
+        if plugin.config.general.merge_draw_to_chat_record:
+            nodes = Nodes(
+                [
+                    Node(
+                        uin=user_id,
+                        name=user_name,
+                        content=[Image.fromBytes(img)],
+                    )
+                    for img in images
+                ]
             )
-        ])
-        yield event.chain_result([nodes])
+            yield event.chain_result([nodes])
+        else:
+            yield event.chain_result([Image.fromBytes(img) for img in images])
     except GenerateError as e:
         logger.error(f"Generation failed: {e}")
         readable = format_readable_error(e)

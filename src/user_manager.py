@@ -157,6 +157,18 @@ class UserManager:
         user.quota -= 1
         self._save()
         return True
+
+    def consume_quota_n(self, user_id: str, amount: int) -> bool:
+        """消耗指定次数额度，返回是否成功"""
+        amount = max(0, int(amount))
+        if amount == 0:
+            return True
+        user = self._get_user(user_id)
+        if user.quota < amount:
+            return False
+        user.quota -= amount
+        self._save()
+        return True
     
     def can_use(self, user_id: str) -> tuple[bool, str]:
         """

@@ -3,7 +3,8 @@
     "title": "GeneralConfig",
     "type": "object",
     "default": {
-      "help_t2i": true
+      "help_t2i": true,
+      "merge_draw_to_chat_record": true
     },
     "description": "通用设置",
     "items": {
@@ -11,6 +12,13 @@
         "default": true,
         "description": "将画图帮助信息生成为图片",
         "title": "Help T2I",
+        "type": "bool"
+      },
+      "merge_draw_to_chat_record": {
+        "default": true,
+        "description": "将画图结果合并为聊天记录",
+        "hint": "关闭后将直接发送图片，不合并存在被举报风险，请自行评估",
+        "title": "Merge Draw To Chat Record",
         "type": "bool"
       }
     }

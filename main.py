@@ -13,7 +13,7 @@ from astrbot import logger
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter as event_filter
 from astrbot.api.provider import LLMResponse
-from astrbot.api.message_components import Image, Plain, Reply
+from astrbot.api.message_components import Image, Node, Nodes, Plain, Reply
 from astrbot.api.star import Context, Star
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import ToolExecResult
@@ -236,10 +236,22 @@ class STNaiGenerateImageTool(ConfigNeededTool):
             )
 
         try:
-            await ctx.send_message(
-                event.unified_msg_origin,
-                MessageChain([Image.fromBytes(image)]),
-            )
+            if self.config.general.merge_draw_to_chat_record:
+                sender_id = event.get_sender_id()
+                sender_name = event.get_sender_name()
+                nodes = Nodes(
+                    [
+                        Node(
+                            uin=sender_id,
+                            name=sender_name,
+                            content=[Image.fromBytes(image)],
+                        )
+                    ]
+                )
+                chain = MessageChain([nodes])
+            else:
+                chain = MessageChain([Image.fromBytes(image)])
+            await ctx.send_message(event.unified_msg_origin, chain)
         except Exception as e:
             logger.exception("Send image failed")
             return (
@@ -450,7 +462,11 @@ class Plugin(Star):
             logger.debug(f"获取引用消息失败: {e}")
             return ""
 
-    async def _parse_args(self, event: AstrMessageEvent, is_whitelisted: bool = False) -> Req | None:
+    async def _parse_args(
+        self,
+        event: AstrMessageEvent,
+        is_whitelisted: bool = False,
+    ) -> tuple[Req, int] | None:
         """解析命令参数，支持多预设
         
         预设格式：s1=xxx, s2=xxx, ...
@@ -551,6 +567,15 @@ class Plugin(Star):
                     # 其他参数直接覆盖
                     merged[key] = value
         
+        # 解析批量数量（不参与绘图参数传递）
+        raw_count = merged.pop("n", "")
+        if raw_count:
+            if not raw_count.isdigit() or int(raw_count) < 1:
+                raise ValueError("参数 n 必须是大于等于 1 的整数")
+            batch_count = int(raw_count)
+        else:
+            batch_count = 1
+
         # 构建最终参数字符串
         final_params: list[str] = []
         
@@ -578,7 +603,8 @@ class Plugin(Star):
         
         final_raw = '\n'.join(final_params)
         
-        return await parse_req(final_raw, event.message_obj.message, self.config, is_whitelisted)
+        req = await parse_req(final_raw, event.message_obj.message, self.config, is_whitelisted)
+        return req, batch_count
 
     # ========== 签到命令 ==========
     

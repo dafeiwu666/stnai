@@ -34,6 +34,15 @@ class GeneralConfig(BaseModel):
         bool,
         Field(description="将画图帮助信息生成为图片"),
     ] = True
+    merge_draw_to_chat_record: Annotated[
+        bool,
+        Field(
+            description="将画图结果合并为聊天记录",
+            json_schema_extra={
+                "hint": "关闭后将直接发送图片，不合并存在被举报风险，请自行评估",
+            },
+        ),
+    ] = True
 
 
 class RequestConfig(BaseModel):
