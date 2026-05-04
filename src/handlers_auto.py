@@ -28,6 +28,7 @@ async def handle_auto_draw_on(plugin, event) -> AsyncIterator:
 
     raw_input = event.message_str.removeprefix("nai自动画图开").strip()
     preset_names, _ = plugin._parse_presets_from_params(raw_input)
+    preset_names = plugin._apply_default_preset_to_names(preset_names)
 
     for preset_name in preset_names:
         preset = plugin.preset_manager.get_preset(preset_name)
@@ -68,6 +69,7 @@ async def handle_auto_draw(plugin, event) -> AsyncIterator:
             return
 
         preset_names, _ = plugin._parse_presets_from_params(raw_input)
+        preset_names = plugin._apply_default_preset_to_names(preset_names)
         if not preset_names:
             yield event.plain_result("请使用键值对格式设置预设，例如：\nnai自动画图\ns1=猫娘")
             return
