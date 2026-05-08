@@ -313,6 +313,7 @@ character_keep=true
 | `append_tag` `b_tag` | 后置正向/后置正向提示词 | 添加到正向提示词最后方 |
 | `prepend_negative` `a_ne` | 前置负面/前置负面提示词 | 添加到负面提示词最前方 |
 | `append_negative` `b_ne` | 后置负面/后置负面提示词 | 添加到负面提示词最后方 |
+| `n` | 批量生成 | 扣除对应额度 |
 | `model` | 模型 | 选择绘图模型 |
 | `artist` | 画师/画师串 | 指定画师风格 |
 | `size` | 画面尺寸 | 竖图`portrait`/横图`landscape`/方图`square` 或 WxH(白名单专用) |
