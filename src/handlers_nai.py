@@ -10,6 +10,7 @@ from astrbot.api.message_components import Image, Node, Nodes
 from .data_source import GenerateError, wrapped_generate
 from .llm import ReturnToLLMError, llm_generate_advanced_req
 from .llm_utils import format_readable_error
+from .utils import extract_batch_count_from_texts
 
 
 async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIterator:
@@ -37,8 +38,16 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
     raw_input = event.message_str.removeprefix("nai画图").strip()
     preset_names, other_params = plugin._parse_presets_from_params(raw_input)
     preset_names = plugin._apply_default_preset_to_names(preset_names)
+    cs_name = (other_params.get("cs") or "").strip()
 
     description = other_params.get("ds", "")
+
+    cs_content = ""
+    if cs_name:
+        if not plugin.cs_store.exists(user_id, cs_name):
+            yield event.plain_result(f"角色保持 {cs_name} 不存在，请先使用 /cs 创建")
+            return
+        cs_content = plugin.cs_store.read(user_id, cs_name)
 
     reply_text = plugin._get_reply_text(event)
     if reply_text:
@@ -66,6 +75,15 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
         )
         return
 
+    try:
+        batch_count = extract_batch_count_from_texts(
+            [raw_input, *preset_contents],
+            max_n=plugin.config.request.max_n,
+        )
+    except Exception as e:  # noqa: BLE001
+        yield event.plain_result(f"参数解析失败：{format_readable_error(e)}")
+        return
+
     full_description_parts = list(reversed(preset_contents))
     if description:
         full_description_parts.append(description)
@@ -75,12 +93,20 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
         f"[nai画图] presets={preset_names}, description={description[:50] if description else 'None'}"
     )
 
+    if quota_enabled and not is_whitelisted:
+        quota = plugin.user_manager.get_quota(user_id)
+        if quota < batch_count:
+            yield event.plain_result(
+                f"你的画图次数不足，当前剩余 {quota} 次，本次需要 {batch_count} 次"
+            )
+            return
+
     res = await plugin._queue.reserve(
         user_id,
         is_whitelisted=is_whitelisted,
         max_queue_size=plugin.config.request.max_queue_size,
         max_concurrent=plugin.config.request.max_concurrent,
-        consume_quota=(lambda: plugin.user_manager.consume_quota(user_id))
+        consume_quota=(lambda: plugin.user_manager.consume_quota_n(user_id, batch_count))
         if quota_enabled and not is_whitelisted
         else None,
     )
@@ -110,21 +136,24 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
                 max_concurrent=plugin.config.request.max_concurrent
             )
 
-            req = await llm_generate_advanced_req(
-                instructions=f"画一张图\n{full_description}",
-                config=plugin.config,
-                ctx=plugin.context,
-                event=event,
-                vision_images=vision_images,
-                skip_default_prompts=bool(preset_contents),
-            )
+            images: list[bytes] = []
+            for _ in range(batch_count):
+                req = await llm_generate_advanced_req(
+                    instructions=f"画一张图\n{full_description}",
+                    config=plugin.config,
+                    ctx=plugin.context,
+                    event=event,
+                    vision_images=vision_images,
+                    skip_default_prompts=bool(preset_contents),
+                    extra_system_prompt=cs_content,
+                )
 
-            async def _do_generate():
-                nonlocal token
-                token = plugin._get_next_token()
-                return await wrapped_generate(req, plugin.config, token=token)
+                async def _do_generate():
+                    nonlocal token
+                    token = plugin._get_next_token()
+                    return await wrapped_generate(req, plugin.config, token=token)
 
-            image = await plugin._run_with_retry(_do_generate)
+                images.append(await plugin._run_with_retry(_do_generate))
 
         user_id = event.get_sender_id()
         user_name = event.get_sender_name()
@@ -134,13 +163,14 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
                     Node(
                         uin=user_id,
                         name=user_name,
-                        content=[Image.fromBytes(image)],
+                        content=[Image.fromBytes(img)],
                     )
+                    for img in images
                 ]
             )
             yield event.chain_result([nodes])
         else:
-            yield event.chain_result([Image.fromBytes(image)])
+            yield event.chain_result([Image.fromBytes(img) for img in images])
     except ReturnToLLMError as e:
         yield event.plain_result(f"画图失败：{e}")
     except asyncio.CancelledError:

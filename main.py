@@ -29,6 +29,7 @@ from .src.llm import (
     llm_generate_image,
 )
 from .src.models import Req
+from .src.character_keep_store import CharacterKeepStore, extract_nai_tag
 from .src.params import (
     parse_req,
     req_model_assembler,
@@ -43,6 +44,12 @@ from .src.handlers_auto import (
     handle_auto_draw_off,
     handle_auto_draw_on,
     handle_llm_response_auto_draw,
+)
+from .src.handlers_cs import (
+    handle_ccs,
+    handle_cs,
+    handle_dcs,
+    handle_scs,
 )
 
 COMMAND = "nai"
@@ -274,6 +281,10 @@ class Plugin(Star):
         data_dir = Path(__file__).parent / "data"
         self.user_manager = UserManager(data_dir)
         self.preset_manager = PresetManager(data_dir)
+
+        cs_dir = data_dir / "cs"
+        cssaying_path = Path(__file__).parent / "src" / "prompts" / "cssaying.txt"
+        self.cs_store = CharacterKeepStore(cs_dir, cssaying_path)
         
         # 自动画图状态（按会话存储）
         # key: unified_msg_origin
@@ -499,6 +510,7 @@ class Plugin(Star):
         direct_params: list[tuple[str, str]] = []  # 直接参数
         preset_params_list: list[list[tuple[str, str]]] = []  # 按预设编号排序的预设参数
         preset_numbers: list[int] = []  # 预设编号列表
+        cs_name = ""
         
         import re
         preset_pattern = re.compile(r'^s(\d+)$')
@@ -513,6 +525,12 @@ class Plugin(Star):
                 key = key.strip()
                 value = value.strip()
                 
+                if key == "cs":
+                    if cs_name and cs_name != value:
+                        raise ValueError("只能指定一个 cs 名称")
+                    cs_name = value
+                    continue
+
                 # 检查是否是预设参数
                 match = preset_pattern.match(key)
                 if match:
@@ -530,6 +548,8 @@ class Plugin(Star):
                             continue
                         if '=' in pl:
                             pk, pv = pl.split('=', 1)
+                            if pk.strip() == "cs":
+                                continue
                             preset_params.append((pk.strip(), pv.strip()))
                         else:
                             # 没有 = 号的行视为 tag
@@ -560,6 +580,8 @@ class Plugin(Star):
                             continue
                         if '=' in pl:
                             pk, pv = pl.split('=', 1)
+                            if pk.strip() == "cs":
+                                continue
                             preset_params.append((pk.strip(), pv.strip()))
                         else:
                             preset_params.append(('tag', pl))
@@ -615,6 +637,20 @@ class Plugin(Star):
             batch_count = int(raw_count)
         else:
             batch_count = 1
+
+        max_n = int(getattr(self.config.request, "max_n", 0) or 0)
+        if max_n > 0 and batch_count > max_n:
+            raise ValueError(f"参数 n 不能超过 {max_n}")
+
+        if cs_name:
+            user_id = self._get_user_id(event)
+            if not self.cs_store.exists(user_id, cs_name):
+                raise ValueError(f"角色保持 {cs_name} 不存在，请先使用 /cs 创建")
+            cs_content = self.cs_store.read(user_id, cs_name)
+            cs_tag = extract_nai_tag(cs_content)
+            if not cs_tag:
+                raise ValueError("未找到 NovelAI tag style 外貌提示词内容")
+            tag_parts.append(cs_tag)
 
         # 构建最终参数字符串
         final_params: list[str] = []
@@ -936,6 +972,32 @@ class Plugin(Star):
             yield event.plain_result(f"✅ 预设 #{title} 已删除")
         else:
             yield event.plain_result(f"预设 #{title} 不存在")
+
+    # ========== 角色保持命令 ==========
+
+    @event_filter.command("cs")
+    async def cmd_cs(self, event: AstrMessageEvent):
+        """角色保持：创建/列表"""
+        async for result in handle_cs(self, event):
+            yield result
+
+    @event_filter.command("dcs")
+    async def cmd_dcs(self, event: AstrMessageEvent):
+        """角色保持删除"""
+        async for result in handle_dcs(self, event):
+            yield result
+
+    @event_filter.command("scs")
+    async def cmd_scs(self, event: AstrMessageEvent):
+        """查询角色保持外貌提示词"""
+        async for result in handle_scs(self, event):
+            yield result
+
+    @event_filter.command("ccs")
+    async def cmd_ccs(self, event: AstrMessageEvent):
+        """修改角色保持外貌提示词"""
+        async for result in handle_ccs(self, event):
+            yield result
 
     # ========== nai画图命令（直接调用插件AI） ==========
     

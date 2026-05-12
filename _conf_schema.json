@@ -33,6 +33,7 @@
       "read_timeout": 120.0,
       "max_concurrent": 2,
       "max_queue_size": 10,
+      "max_n": 4,
       "retry_times": 0,
       "retry_wait": 1.0
     },
@@ -86,6 +87,15 @@
         "maximum": 50,
         "hint": "排队等待的最大请求数量，超出时新请求会被拒绝。设置为 0 表示不限制",
         "title": "Max Queue Size",
+        "type": "int"
+      },
+      "max_n": {
+        "default": 4,
+        "description": "批量生成上限",
+        "minimum": 0,
+        "maximum": 50,
+        "hint": "限制 n 参数的最大值。设置为 0 表示不限制",
+        "title": "Max N",
         "type": "int"
       },
       "retry_times": {

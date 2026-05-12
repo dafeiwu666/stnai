@@ -167,6 +167,7 @@ async def llm_generate_image(
     vibe_transfer_images: list[str] | None = None,
     vision_images: list[Any] | None = None,
     skip_default_prompts: bool = False,
+    extra_system_prompt: str | None = None,
     token: str = "",
 ):
     """使用 LLM 生成高级参数并生成图片。
@@ -190,6 +191,7 @@ async def llm_generate_image(
         vibe_transfer_images=vibe_transfer_images,
         vision_images=vision_images,
         skip_default_prompts=skip_default_prompts,
+        extra_system_prompt=extra_system_prompt,
     )
 
     try:
@@ -210,6 +212,7 @@ async def llm_generate_advanced_req(
     vibe_transfer_images: list[str] | None = None,
     vision_images: list[Any] | None = None,
     skip_default_prompts: bool = False,
+    extra_system_prompt: str | None = None,
 ) -> Req:
     """只调用“高级参数生成模型”，返回可用于绘图的 Req。
 
@@ -242,6 +245,8 @@ async def llm_generate_advanced_req(
             len(vibe_transfer_images) if vibe_transfer_images else 0
         ))
     )
+    if extra_system_prompt and extra_system_prompt.strip():
+        system_prompt = f"{system_prompt}\n\n{extra_system_prompt.strip()}"
 
     user_content: str | list[Any]
     if config.llm.enable_vision and vision_images:

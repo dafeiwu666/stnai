@@ -11,6 +11,7 @@ from astrbot.api.provider import LLMResponse
 from .data_source import wrapped_generate
 from .llm import llm_generate_advanced_req
 from .llm_utils import format_readable_error
+from .utils import extract_batch_count_from_texts
 
 
 async def handle_auto_draw_off(plugin, event) -> AsyncIterator:
@@ -27,8 +28,9 @@ async def handle_auto_draw_on(plugin, event) -> AsyncIterator:
         return
 
     raw_input = event.message_str.removeprefix("nai自动画图开").strip()
-    preset_names, _ = plugin._parse_presets_from_params(raw_input)
+    preset_names, other_params = plugin._parse_presets_from_params(raw_input)
     preset_names = plugin._apply_default_preset_to_names(preset_names)
+    cs_name = (other_params.get("cs") or "").strip()
 
     for preset_name in preset_names:
         preset = plugin.preset_manager.get_preset(preset_name)
@@ -36,10 +38,16 @@ async def handle_auto_draw_on(plugin, event) -> AsyncIterator:
             yield event.plain_result(f"预设 {preset_name} 不存在，使用 nai预设列表 查看可用预设")
             return
 
+    if cs_name:
+        if not plugin.cs_store.exists(user_id, cs_name):
+            yield event.plain_result(f"角色保持 {cs_name} 不存在，请先使用 /cs 创建")
+            return
+
     plugin.auto_draw_info[umo] = {
         "enabled": True,
         "presets": preset_names,
         "opener_user_id": user_id,
+        "cs_name": cs_name,
     }
 
     if preset_names:
@@ -68,8 +76,9 @@ async def handle_auto_draw(plugin, event) -> AsyncIterator:
             yield event.plain_result("你已被加入黑名单，无法开启自动画图")
             return
 
-        preset_names, _ = plugin._parse_presets_from_params(raw_input)
+        preset_names, other_params = plugin._parse_presets_from_params(raw_input)
         preset_names = plugin._apply_default_preset_to_names(preset_names)
+        cs_name = (other_params.get("cs") or "").strip()
         if not preset_names:
             yield event.plain_result("请使用键值对格式设置预设，例如：\nnai自动画图\ns1=猫娘")
             return
@@ -80,10 +89,16 @@ async def handle_auto_draw(plugin, event) -> AsyncIterator:
                 yield event.plain_result(f"预设 {preset_name} 不存在，使用 nai预设列表 查看可用预设")
                 return
 
+        if cs_name:
+            if not plugin.cs_store.exists(user_id, cs_name):
+                yield event.plain_result(f"角色保持 {cs_name} 不存在，请先使用 /cs 创建")
+                return
+
         plugin.auto_draw_info[umo] = {
             "enabled": True,
             "presets": preset_names,
             "opener_user_id": user_id,
+            "cs_name": cs_name,
         }
 
         preset_str = ", ".join(f"#{name}" for name in preset_names)
@@ -103,6 +118,7 @@ async def handle_auto_draw(plugin, event) -> AsyncIterator:
         return
 
     presets = current.get("presets", [])
+    cs_name = current.get("cs_name", "")
     opener_id = current.get("opener_user_id", "")
     opener_quota = plugin.user_manager.get_quota(opener_id)
     is_whitelisted = plugin.user_manager.is_whitelisted(opener_id)
@@ -113,6 +129,8 @@ async def handle_auto_draw(plugin, event) -> AsyncIterator:
         status_parts.append(f"使用预设：{preset_str}")
     else:
         status_parts.append("未使用预设")
+    if cs_name:
+        status_parts.append(f"角色保持：{cs_name}")
     status_parts.append(f"开启者：{opener_id}")
     if is_whitelisted:
         status_parts.append("额度：无限（白名单）")
@@ -131,6 +149,7 @@ async def handle_llm_response_auto_draw(plugin, event, resp: LLMResponse):
 
     presets = auto_info.get("presets", [])
     opener_user_id = auto_info.get("opener_user_id", "")
+    cs_name = auto_info.get("cs_name", "")
 
     if not plugin.config.request.tokens:
         return
@@ -177,6 +196,7 @@ async def handle_llm_response_auto_draw(plugin, event, resp: LLMResponse):
             preset_contents,
             opener_user_id,
             is_whitelisted,
+            cs_name,
         )
     )
 
@@ -188,16 +208,38 @@ async def _auto_draw_generate(
     preset_contents: list[str],
     opener_user_id: str,
     is_whitelisted: bool,
+    cs_name: str,
 ):
     quota_enabled = plugin.config.quota.enable_quota
     umo = event.unified_msg_origin
+
+    try:
+        batch_count = extract_batch_count_from_texts(
+            preset_contents,
+            max_n=plugin.config.request.max_n,
+        )
+    except Exception as e:  # noqa: BLE001
+        await event.send(event.plain_result(f"🎨 自动画图失败：{format_readable_error(e)}"))
+        return
+
+    if quota_enabled and not is_whitelisted:
+        quota = plugin.user_manager.get_quota(opener_user_id)
+        if quota < batch_count:
+            await event.send(
+                event.plain_result(
+                    "⚠️ 自动画图已暂停：开启者额度不足\n"
+                    f"开启者 {opener_user_id} 的额度不足，本次需要 {batch_count} 次"
+                )
+            )
+            plugin.auto_draw_info[umo] = None
+            return
 
     res = await plugin._queue.reserve(
         opener_user_id,
         is_whitelisted=is_whitelisted,
         max_queue_size=plugin.config.request.max_queue_size,
         max_concurrent=plugin.config.request.max_concurrent,
-        consume_quota=(lambda: plugin.user_manager.consume_quota(opener_user_id))
+        consume_quota=(lambda: plugin.user_manager.consume_quota_n(opener_user_id, batch_count))
         if quota_enabled and not is_whitelisted
         else None,
     )
@@ -235,6 +277,14 @@ async def _auto_draw_generate(
 
     try:
         ai_response_with_prefix = f"参考：{ai_response}"
+        cs_content = ""
+        if cs_name:
+            if not plugin.cs_store.exists(opener_user_id, cs_name):
+                await event.send(
+                    event.plain_result(f"🎨 自动画图失败：角色保持 {cs_name} 不存在")
+                )
+                return
+            cs_content = plugin.cs_store.read(opener_user_id, cs_name)
         full_parts = list(reversed(preset_contents)) + [ai_response_with_prefix]
         vision_images = [x for x in event.message_obj.message if isinstance(x, Image)]
         full_instructions = "\n\n".join(full_parts)
@@ -247,21 +297,24 @@ async def _auto_draw_generate(
                 max_concurrent=plugin.config.request.max_concurrent
             )
 
-            req = await llm_generate_advanced_req(
-                instructions=f"画一张图\n{full_instructions}",
-                config=plugin.config,
-                ctx=plugin.context,
-                event=event,
-                vision_images=vision_images,
-                skip_default_prompts=bool(preset_contents),
-            )
+            images: list[bytes] = []
+            for _ in range(batch_count):
+                req = await llm_generate_advanced_req(
+                    instructions=f"画一张图\n{full_instructions}",
+                    config=plugin.config,
+                    ctx=plugin.context,
+                    event=event,
+                    vision_images=vision_images,
+                    skip_default_prompts=bool(preset_contents),
+                    extra_system_prompt=cs_content,
+                )
 
-            async def _do_generate():
-                nonlocal token
-                token = plugin._get_next_token()
-                return await wrapped_generate(req, plugin.config, token=token)
+                async def _do_generate():
+                    nonlocal token
+                    token = plugin._get_next_token()
+                    return await wrapped_generate(req, plugin.config, token=token)
 
-            image = await plugin._run_with_retry(_do_generate)
+                images.append(await plugin._run_with_retry(_do_generate))
 
         user_id = event.get_sender_id()
         user_name = event.get_sender_name()
@@ -271,13 +324,14 @@ async def _auto_draw_generate(
                     Node(
                         uin=user_id,
                         name=user_name,
-                        content=[Image.fromBytes(image)],
+                        content=[Image.fromBytes(img)],
                     )
+                    for img in images
                 ]
             )
             await event.send(event.chain_result([nodes]))
         else:
-            await event.send(event.chain_result([Image.fromBytes(image)]))
+            await event.send(event.chain_result([Image.fromBytes(img) for img in images]))
 
     except asyncio.CancelledError:
         await plugin._queue.mark_wait_finished(

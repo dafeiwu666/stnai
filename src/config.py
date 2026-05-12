@@ -102,6 +102,17 @@ class RequestConfig(BaseModel):
             },
         ),
     ] = 10
+    max_n: Annotated[
+        int,
+        Field(
+            description="批量生成上限",
+            ge=0,
+            le=50,
+            json_schema_extra={
+                "hint": "限制 n 参数的最大值。设置为 0 表示不限制",
+            },
+        ),
+    ] = 4
 
     retry_times: Annotated[
         int,
