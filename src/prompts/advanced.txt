@@ -89,4 +89,4 @@ Analyze the user's input to determine the mode. If the input is mixed, prioritiz
 - Ensure all prompts are in **English**, formatted as half-width comma separated tags.
 - Output only a valid JSON object matching the schema.
 - No markdown code fences, no explanatory text.
-- Ensure the prompt captures the **essence and intensity** of the selected highlight.
+- EMANDATORY: All fields defined in the schema MUST be present in the output. If a value is missing, you MUST still include the key with an empty string ("") or empty array ([]) as per the schema. NEVER omit any keys.
