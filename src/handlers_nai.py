@@ -36,18 +36,19 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
             return
 
     raw_input = event.message_str.removeprefix("nai画图").strip()
-    preset_names, other_params = plugin._parse_presets_from_params(raw_input)
+    preset_names, other_params, cs_names = plugin._parse_presets_from_params(raw_input)
     preset_names = plugin._apply_default_preset_to_names(preset_names)
-    cs_name = (other_params.get("cs") or "").strip()
 
     description = other_params.get("ds", "")
 
-    cs_content = ""
-    if cs_name:
-        if not plugin.cs_store.exists(user_id, cs_name):
-            yield event.plain_result(f"角色保持 {cs_name} 不存在，请先使用 /cs 创建")
-            return
-        cs_content = plugin.cs_store.read(user_id, cs_name)
+    cs_content_parts: list[str] = []
+    if cs_names:
+        for cs_name in cs_names:
+            if not plugin.cs_store.exists(user_id, cs_name):
+                yield event.plain_result(f"角色保持 {cs_name} 不存在，请先使用 /cs 创建")
+                return
+            cs_content_parts.append(plugin.cs_store.read(user_id, cs_name))
+    cs_content = "\n\n".join(cs_content_parts)
 
     reply_text = plugin._get_reply_text(event)
     if reply_text:

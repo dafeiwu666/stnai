@@ -389,7 +389,15 @@ class Plugin(Star):
     def _check_permission(self, event: AstrMessageEvent) -> bool:
         """检查是否是管理员"""
         # 这里简单判断，可以根据 AstrBot 的实际权限系统调整
-        return event.is_admin if hasattr(event, 'is_admin') else False
+        is_admin = getattr(event, "is_admin", None)
+        if callable(is_admin):
+            try:
+                return bool(is_admin())
+            except Exception:
+                return False
+        if isinstance(is_admin, bool):
+            return is_admin
+        return False
     
     def _get_next_token(self) -> str:
         """轮询获取下一个可用的 Token"""
@@ -510,10 +518,11 @@ class Plugin(Star):
         direct_params: list[tuple[str, str]] = []  # 直接参数
         preset_params_list: list[list[tuple[str, str]]] = []  # 按预设编号排序的预设参数
         preset_numbers: list[int] = []  # 预设编号列表
-        cs_name = ""
+        cs_entries: dict[int, str] = {}
         
         import re
         preset_pattern = re.compile(r'^s(\d+)$')
+        cs_pattern = re.compile(r'^cs(\d+)$')
         
         for line in lines:
             line = line.strip()
@@ -526,15 +535,26 @@ class Plugin(Star):
                 value = value.strip()
                 
                 if key == "cs":
-                    if cs_name and cs_name != value:
-                        raise ValueError("只能指定一个 cs 名称")
-                    cs_name = value
+                    cs_num = 1
+                else:
+                    cs_match = cs_pattern.match(key)
+                    cs_num = int(cs_match.group(1)) if cs_match else 0
+
+                if cs_num:
+                    existing = cs_entries.get(cs_num)
+                    if existing and existing != value:
+                        raise ValueError(f"cs{cs_num} 重复且不一致")
+                    cs_entries[cs_num] = value
                     continue
 
                 # 检查是否是预设参数
-                match = preset_pattern.match(key)
-                if match:
-                    preset_num = int(match.group(1))
+                if key == "s":
+                    preset_num = 1
+                else:
+                    match = preset_pattern.match(key)
+                    preset_num = int(match.group(1)) if match else 0
+
+                if preset_num:
                     preset = self.preset_manager.get_preset(value)
                     if preset is None:
                         raise ValueError(f"预设 {value} 不存在，使用 nai预设列表 查看可用预设")
@@ -642,15 +662,16 @@ class Plugin(Star):
         if max_n > 0 and batch_count > max_n:
             raise ValueError(f"参数 n 不能超过 {max_n}")
 
-        if cs_name:
+        if cs_entries:
             user_id = self._get_user_id(event)
-            if not self.cs_store.exists(user_id, cs_name):
-                raise ValueError(f"角色保持 {cs_name} 不存在，请先使用 /cs 创建")
-            cs_content = self.cs_store.read(user_id, cs_name)
-            cs_tag = extract_nai_tag(cs_content)
-            if not cs_tag:
-                raise ValueError("未找到 NovelAI tag style 外貌提示词内容")
-            tag_parts.append(cs_tag)
+            for cs_num, cs_name in sorted(cs_entries.items(), key=lambda x: x[0]):
+                if not self.cs_store.exists(user_id, cs_name):
+                    raise ValueError(f"角色保持 {cs_name} 不存在，请先使用 /cs 创建")
+                cs_content = self.cs_store.read(user_id, cs_name)
+                cs_tag = extract_nai_tag(cs_content)
+                if not cs_tag:
+                    raise ValueError("未找到 NovelAI tag style 外貌提示词内容")
+                tag_parts.append(cs_tag)
 
         # 构建最终参数字符串
         final_params: list[str] = []
@@ -1001,7 +1022,10 @@ class Plugin(Star):
 
     # ========== nai画图命令（直接调用插件AI） ==========
     
-    def _parse_presets_from_params(self, raw_params: str) -> tuple[list[str], dict[str, str]]:
+    def _parse_presets_from_params(
+        self,
+        raw_params: str,
+    ) -> tuple[list[str], dict[str, str], list[str]]:
         """从参数中解析预设列表和其他参数
         
         Returns:
@@ -1009,8 +1033,10 @@ class Plugin(Star):
         """
         import re
         preset_pattern = re.compile(r'^s(\d+)$')
+        cs_pattern = re.compile(r'^cs(\d+)$')
         
         presets: list[tuple[int, str]] = []  # (编号, 预设名)
+        cs_entries: dict[int, str] = {}
         other_params: dict[str, str] = {}
         
         for line in raw_params.split('\n'):
@@ -1023,16 +1049,34 @@ class Plugin(Star):
                 key = key.strip()
                 value = value.strip()
                 
-                match = preset_pattern.match(key)
-                if match:
-                    preset_num = int(match.group(1))
+                if key == "s":
+                    preset_num = 1
+                else:
+                    match = preset_pattern.match(key)
+                    preset_num = int(match.group(1)) if match else 0
+
+                if preset_num:
                     presets.append((preset_num, value))
+                    continue
+
+                if key == "cs":
+                    cs_num = 1
+                else:
+                    cs_match = cs_pattern.match(key)
+                    cs_num = int(cs_match.group(1)) if cs_match else 0
+
+                if cs_num:
+                    existing = cs_entries.get(cs_num)
+                    if existing and existing != value:
+                        raise ValueError(f"cs{cs_num} 重复且不一致")
+                    cs_entries[cs_num] = value
                 else:
                     other_params[key] = value
         
         # 按编号排序
         presets.sort(key=lambda x: x[0])
-        return [name for _, name in presets], other_params
+        cs_names = [name for _, name in sorted(cs_entries.items(), key=lambda x: x[0])]
+        return [name for _, name in presets], other_params, cs_names
     
     @event_filter.command("nai画图")
     async def cmd_nai_draw(self, event: AstrMessageEvent):
