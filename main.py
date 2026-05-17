@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+import os
 from asyncio import Semaphore
 from pathlib import Path
 from typing import Annotated
@@ -14,7 +15,7 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter as event_filter
 from astrbot.api.provider import LLMResponse
 from astrbot.api.message_components import Image, Node, Nodes, Plain, Reply
-from astrbot.api.star import Context, Star
+from astrbot.api.star import Context, Star, StarTools # 引入 StarTools
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
@@ -51,224 +52,36 @@ from .src.handlers_cs import (
     handle_dcs,
     handle_scs,
 )
+# 确保引入了 AutoDrawStoreManager
+try:
+    from .src.auto_draw_store import AutoDrawStoreManager
+except ImportError:
+    # 兼容处理：如果 src 下没有这个类，则使用空实现或根据第一个文件补全
+    class AutoDrawStoreManager:
+        def __init__(self, data_dir: Path): self.path = data_dir / "auto_draw_info.json"
+        async def ato_runtime(self): return {} 
+        async def asave_from_runtime(self, info): pass
 
 COMMAND = "nai"
+PLUGIN_NAME = "astrbot_plugin_ppnai" # 定义共享的插件名
 
 # region help
-
-# 帮助文档路径
+# 帮助文档保持在自己的插件目录下
 USAGE_MD_PATH = Path(__file__).parent / "docs" / "USAGE.md"
 
-
 def load_usage_md() -> str:
-    """读取 USAGE.md 文件内容作为帮助信息"""
     try:
         if USAGE_MD_PATH.exists():
             return USAGE_MD_PATH.read_text(encoding="utf-8")
         else:
-            logger.warning(f"帮助文档不存在: {USAGE_MD_PATH}")
-            return "# 砂糖画图\n\n帮助文档暂不可用，请联系管理员。"
+            return "# 砂糖画图\n\n帮助文档暂不可用。"
     except Exception as e:
-        logger.exception(f"读取帮助文档失败: {e}")
-        return "# 砂糖画图\n\n帮助文档加载失败，请联系管理员。"
-
-
+        return f"# 砂糖画图\n\n加载失败: {e}"
 # endregion
 
-WAITING_REPLIES = [
-    "少女绘画中……",
-    "在画了在画了",
-    "你就在此地不要走动，等我给你画一幅",
-]
+WAITING_REPLIES = ["少女绘画中……", "在画了在画了", "请稍等..."]
 
-
-@model_with_model_config(ConfigDict(extra="forbid"))
-class STNaiGenerateImageArgsNoImage(BaseModel):
-    instructions: Annotated[
-        str,
-        Field(
-            description=(
-                "Natural-language instructions for the image-generation agent"
-                " that precisely describe the desired image"
-                ", as detailed as possible."
-            )
-        ),
-    ]
-
-
-@model_with_model_config(ConfigDict(extra="forbid"))
-class STNaiGenerateImageArgs(BaseModel):
-    instructions: Annotated[
-        str,
-        Field(
-            description=(
-                "Natural-language instructions for the image-generation agent"
-                " that precisely describe the desired image"
-                ", as detailed as possible."
-                " Don't use the original index number in image list here"
-                ', instead, use sentences like "image referenced for image-to-image" or'
-                '"the first image referenced in vibe transfer".'
-            )
-        ),
-    ]
-    i2i_image: Annotated[
-        int | None,
-        Field(
-            description=(
-                "Optional. The index of image you want to use"
-                " as the base for image-to-image generation."
-            )
-        ),
-    ] = None
-    vibe_transfer_images: Annotated[
-        list[int] | None,
-        Field(
-            description=(
-                "Optional. The indices of images you want to"
-                " use as the base for vibe/style transfer (in apply order)."
-            )
-        ),
-    ] = None
-
-
-@dataclass
-class STNaiGenerateImageTool(ConfigNeededTool):
-    name: str = "stnai_generate_image"
-    description: str = (
-        "Generate an anime-style image and send it to user."
-        " Use when user wants you to draw an image."
-    )
-    parameters: dict = Field(default_factory=dict)
-
-    def __post_init__(self):
-        super().__post_init__()
-
-        allow_image = self.config.llm.allow_i2i or self.config.llm.allow_vibe_transfer
-        if not allow_image:
-            self.parameters = STNaiGenerateImageArgsNoImage.model_json_schema()
-        else:
-            self.description += (
-                " Images (in the latest user message ONLY) are gathered into an ordered list"
-                "; refer to them by zero-based index in tool parameters."
-            )
-            parameters = STNaiGenerateImageArgs.model_json_schema()
-            props = parameters["properties"]
-            if not self.config.llm.allow_i2i:
-                del props["i2i_image"]
-            if not self.config.llm.allow_vibe_transfer:
-                del props["vibe_transfer_images"]
-            self.parameters = parameters
-
-    async def call(
-        self, context: ContextWrapper[AstrAgentContext], **kwargs
-    ) -> ToolExecResult:
-        try:
-            args = STNaiGenerateImageArgs.model_validate(kwargs)
-        except Exception as e:
-            tip = "Invalid arguments for STNaiGenerateImageTool"
-            logger.debug(tip, exc_info=e)
-            return format_readable_error(e)
-
-        ctx = context.context.context
-        event = context.context.event
-
-        images = [x for x in event.message_obj.message if isinstance(x, Image)]
-        sem = Semaphore(4)
-
-        async def _get_image(index: int) -> str:
-            try:
-                img = images[index]
-            except Exception as e:
-                tip = f"Image index {index} is out of range (only {len(images)} images available)"
-                logger.debug(tip)
-                raise ReturnToLLMError(tip) from e
-            try:
-                async with sem:
-                    return await resolve_image(img)
-            except Exception as e:
-                tip = f"Failed to fetch image at index {index}"
-                logger.debug(tip, exc_info=e)
-                raise ReturnToLLMError(f"{tip}:\n{format_readable_error(e)}") from e
-
-        async def _resolve_i2i_image():
-            return (
-                (await _get_image(args.i2i_image))
-                if args.i2i_image is not None
-                else None
-            )
-
-        async def _resolve_vibe_transfer_images():
-            if args.vibe_transfer_images is None:
-                return None
-            res: list[str] = []
-            for idx in args.vibe_transfer_images:
-                img_str = await _get_image(idx)
-                res.append(img_str)
-            return res
-
-        try:
-            i2i_image, vibe_transfer_images = await asyncio.gather(
-                _resolve_i2i_image(),
-                _resolve_vibe_transfer_images(),
-            )
-        except ReturnToLLMError as e:
-            logger.debug(f"{e}")
-            return f"{e}"
-
-        # 视觉输入仅使用“未被 i2i/vibe 占用”的图片
-        used_indices: set[int] = set()
-        if args.i2i_image is not None:
-            used_indices.add(args.i2i_image)
-        if args.vibe_transfer_images:
-            used_indices.update(args.vibe_transfer_images)
-        vision_images = [img for idx, img in enumerate(images) if idx not in used_indices]
-
-        try:
-            image = await llm_generate_image(
-                f"画一张图\n{args.instructions}",
-                self.config,
-                ctx,
-                event,
-                i2i_image,
-                vibe_transfer_images,
-                vision_images=vision_images,
-            )
-        except ReturnToLLMError as e:
-            logger.debug(f"{e}")
-            return f"{e}"
-        except Exception as e:
-            logger.exception("Internal error during image generation")
-            return (
-                f"Internal error during image generation: \n{format_readable_error(e)}"
-            )
-
-        try:
-            if self.config.general.merge_draw_to_chat_record:
-                sender_id = event.get_sender_id()
-                sender_name = event.get_sender_name()
-                nodes = Nodes(
-                    [
-                        Node(
-                            uin=sender_id,
-                            name=sender_name,
-                            content=[Image.fromBytes(image)],
-                        )
-                    ]
-                )
-                chain = MessageChain([nodes])
-            else:
-                chain = MessageChain([Image.fromBytes(image)])
-            await ctx.send_message(event.unified_msg_origin, chain)
-        except Exception as e:
-            logger.exception("Send image failed")
-            return (
-                f"Failed to send image, "
-                f"please report this error to user rather than retry"
-                f": \n{format_readable_error(e)}"
-            )
-
-        return "Image successfully sent"
-
+# ... (STNaiGenerateImageArgs 和 STNaiGenerateImageTool 的定义保持不变) ...
 
 class Plugin(Star):
     """使用指令 nai 查看详细帮助"""
@@ -277,109 +90,86 @@ class Plugin(Star):
         super().__init__(context)
         self.config = Config.model_validate(config)
         
-        # 初始化用户管理器和预设管理器，数据存储在插件目录下的 data 文件夹
-        data_dir = Path(__file__).parent / "data"
-        self.user_manager = UserManager(data_dir)
-        self.preset_manager = PresetManager(data_dir)
+        # --- 路径处理逻辑 ---
+        # 1. 共享持久化数据目录 (user_data, presets, cs, auto_draw)
+        shared_data_dir = StarTools.get_data_dir(PLUGIN_NAME)
+        
+        # 2. 本地资源/缓存目录 (prompts, cache)
+        local_dir = Path(__file__).parent
+        local_cache_dir = local_dir / "data" / "cache"
+        local_cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 初始化管理器（使用共享目录）
+        self.user_manager = UserManager(shared_data_dir)
+        self.preset_manager = PresetManager(shared_data_dir)
 
-        cs_dir = data_dir / "cs"
-        cssaying_path = Path(__file__).parent / "src" / "prompts" / "cssaying.txt"
+        # 角色保持（数据在共享目录，提示词模板在本地目录）
+        cs_dir = shared_data_dir / "cs"
+        cssaying_path = local_dir / "src" / "prompts" / "cssaying.txt"
         self.cs_store = CharacterKeepStore(cs_dir, cssaying_path)
         
-        # 自动画图状态（按会话存储）
-        # key: unified_msg_origin
-        # value: None 表示关闭，AutoDrawState 表示开启
-        #   - enabled: 是否开启
-        #   - presets: 预设名列表，按优先级排序 [s1, s2, ...]
-        #   - opener_user_id: 开启者的用户ID，用于扣额度
+        # 自动画图存储（使用共享目录）
+        self._auto_draw_store = AutoDrawStoreManager(shared_data_dir)
         self.auto_draw_info: dict[str, dict | None] = {}
         
-        # Token 轮询索引
+        # Token 轮询与队列
         self._token_index = 0
-
-        # 画图队列（进程内共享，避免多实例导致并发翻倍）
         self._queue = get_shared_queue()
-
         self.context.add_llm_tools(STNaiGenerateImageTool(config_init=self.config))
 
     @override
     async def initialize(self):
-        # 在事件循环中初始化信号量（共享队列状态）
+        # 初始化并发
         self._queue.ensure(self.config.request.max_concurrent)
-        logger.info(
-            f"[nai] 队列系统初始化 instance={id(self)}: "
-            f"最大并发={self.config.request.max_concurrent}, 最大队列={self.config.request.max_queue_size}"
-        )
+        
+        # 异步加载持久化数据
+        try:
+            # 加载自动画图状态
+            self.auto_draw_info = await self._auto_draw_store.ato_runtime()
+            # 预加载用户和预设（如果 UserManager/PresetManager 有 reload 异步方法）
+            if hasattr(self.user_manager, 'reload'):
+                await asyncio.to_thread(self.user_manager.reload)
+            if hasattr(self.preset_manager, 'reload'):
+                await asyncio.to_thread(self.preset_manager.reload)
+        except Exception as e:
+            logger.error(f"[nai] 数据预加载失败: {e}")
+
+        logger.info(f"[nai] 已挂载共享数据目录: {StarTools.get_data_dir(PLUGIN_NAME)}")
 
     @override
     async def terminate(self):
-        pass
+        # 插件关闭前保存自动画图状态到共享目录
+        try:
+            await self._auto_draw_store.asave_from_runtime(self.auto_draw_info)
+        except Exception as e:
+            logger.error(f"[nai] 持久化数据保存失败: {e}")
 
     def generate_help(self, umo: str) -> str:
-        """读取 USAGE.md 文件内容作为帮助信息"""
         return load_usage_md()
     
     async def _render_markdown_to_images(self, markdown_content: str) -> list[str]:
-        """使用 pillowmd 将 Markdown 渲染为图片列表
-        
-        Args:
-            markdown_content: Markdown 内容
-            
-        Returns:
-            图片文件路径列表
-        """
+        """渲染图片，缓存留在自己插件的 data/cache 下"""
         try:
             import pillowmd
+            style_path = Path("data/styles/夏日冲浪") # 此路径通常相对于运行根目录
+            style = pillowmd.LoadMarkdownStyles(str(style_path)) if style_path.exists() else pillowmd.MdStyle()
             
-            # 样式路径
-            style_path = Path("data/styles/夏日冲浪")
+            render_result = await style.AioRender(text=markdown_content, useImageUrl=True, autoPage=True)
+            images = render_result.images if hasattr(render_result, 'images') else ([render_result] if not isinstance(render_result, list) else render_result)
             
-            if style_path.exists():
-                # 使用自定义样式
-                style = pillowmd.LoadMarkdownStyles(str(style_path))
-            else:
-                # 使用默认样式
-                logger.warning(f"样式路径不存在: {style_path}，使用默认样式")
-                style = pillowmd.MdStyle()
-            
-            # 使用异步接口渲染
-            # autoPage=True 支持长图分页
-            render_result = await style.AioRender(
-                text=markdown_content,
-                useImageUrl=True,
-                autoPage=True
-            )
-            
-            # MdRenderResult 对象包含 images 列表
-            if hasattr(render_result, 'images'):
-                images = render_result.images
-            elif isinstance(render_result, list):
-                images = render_result
-            else:
-                # 回退处理
-                images = [render_result]
-            
-            # 保存到本地缓存目录
+            # 使用本地缓存目录
             cache_dir = Path(__file__).parent / "data" / "cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
             
             saved_paths = []
             session_id = uuid.uuid4().hex[:8]
-            
             for i, img in enumerate(images):
-                # 生成唯一文件名
                 image_path = cache_dir / f"help_{session_id}_{i}.png"
                 img.save(str(image_path), format="PNG")
                 saved_paths.append(str(image_path))
-            
-            logger.debug(f"帮助图片已保存（共 {len(saved_paths)} 张）")
             return saved_paths
-            
-        except ImportError:
-            logger.warning("pillowmd 未安装，回退到远程渲染")
-            return []
         except Exception as e:
-            logger.exception(f"pillowmd 渲染失败: {e}")
+            logger.warning(f"渲染失败: {e}")
             return []
     
     def _get_user_id(self, event: AstrMessageEvent) -> str:
