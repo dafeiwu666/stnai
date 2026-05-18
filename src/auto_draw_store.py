@@ -18,6 +18,10 @@ class AutoDrawSession(BaseModel):
     presets: list[str] = Field(default_factory=list)
     opener_user_id: str = ""
     cs_names: list[str] = Field(default_factory=list)
+    i2i_image: str | None = None
+    vibe_transfer_images: list[str] = Field(default_factory=list)
+    character_keep_image: str | None = None
+    vision_images: list[str] = Field(default_factory=list)
 
 
 class AutoDrawStore(BaseModel):

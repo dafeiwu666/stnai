@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from pydantic.dataclasses import dataclass
 
@@ -12,21 +12,15 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 from .config import Config
 from .data_source import wrapped_generate
+from .image_params import ResolvedImageParams
 from .llm_schema import (
     GENERATE_IMAGE_ADVANCED_SCHEMA_TXT,
     OrientationType,
     STNaiGenerateImageAdvancedArgs,
-    STNaiGenerateImageI2IArgs,
-    STNaiGenerateImageMultiRoleArgs,
-    STNaiGenerateImageVibeTransferArgs,
 )
 from .llm_utils import apply_regex_replacements, format_readable_error
 from .models import Req, ReqAdditionMultiRole
-from .params import complete_defaults, post_check_limits
-from .params import resolve_image
-
-if TYPE_CHECKING:
-    pass
+from .params import complete_defaults, post_check_limits, resolve_image
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 ADVANCED_PROMPT_PATH = PROMPTS_DIR / "advanced.txt"
@@ -35,9 +29,9 @@ ADVANCED_PROMPT_PATH = PROMPTS_DIR / "advanced.txt"
 def get_size_from_config(config: Config, orientation: OrientationType) -> str:
     if orientation == "portrait":
         return config.defaults.portrait_size
-    elif orientation == "landscape":
+    if orientation == "landscape":
         return config.defaults.landscape_size
-    elif orientation == "square":
+    if orientation == "square":
         return config.defaults.square_size
     return config.defaults.size
 
@@ -63,11 +57,12 @@ async def llm_generate_prepare_req(
     config: Config,
     i2i_image: str | None = None,
     vibe_transfer_images: list[str] | None = None,
+    character_keep_image: str | None = None,
     skip_default_prompts: bool = False,
 ) -> Req:
     """
     准备生成图片的请求参数
-    
+
     Args:
         message: LLM 输出的 JSON 字符串
         config: 配置
@@ -78,7 +73,7 @@ async def llm_generate_prepare_req(
     if message.strip() == "SKIP":
         raise RuntimeError(
             "Inner LLM Skipped advanced param generation"
-            ", there may have a internal error"
+            ", there may have a internal error",
         )
 
     # 应用正则清洗
@@ -91,7 +86,7 @@ async def llm_generate_prepare_req(
         raise ReturnToLLMError(
             f"Failed to parse advanced generation arguments"
             f", please ensure your response follows the specified schema"
-            f"\n{format_readable_error(e)}"
+            f"\n{format_readable_error(e)}",
         ) from e
 
     try:
@@ -127,13 +122,20 @@ async def llm_generate_prepare_req(
                 if len(args.vibe_transfer) != len(vibe_transfer_images):
                     raise ValueError(
                         "The number of vibe transfer settings"
-                        " does not match the number of vibe transfer images."
+                        " does not match the number of vibe transfer images.",
                     )
                 for i, vt_args in enumerate(args.vibe_transfer):
                     if vt_args.information_extraction_rate is not None:
                         vt[i]["info_extract"] = vt_args.information_extraction_rate
                     if vt_args.reference_strength is not None:
                         vt[i]["ref_strength"] = vt_args.reference_strength
+
+        if character_keep_image:
+            data_addition["character_keep"] = {
+                "base64": character_keep_image,
+                "keep_vibe": config.defaults.character_keep_vibe,
+                "strength": config.defaults.character_keep_strength,
+            }
 
         if args.multi_role_list:
             data_addition["multi_role_list"] = [
@@ -152,7 +154,7 @@ async def llm_generate_prepare_req(
             f"\n(If this is unrelated with your input, this may be an internal error."
             f" You can output four-alphabet uppercase word `SKIP`"
             f" at next round to abort generation)"
-            f"\n{format_readable_error(e)}"
+            f"\n{format_readable_error(e)}",
         ) from e
 
     return req
@@ -165,13 +167,14 @@ async def llm_generate_image(
     event: AstrMessageEvent,
     i2i_image: str | None = None,
     vibe_transfer_images: list[str] | None = None,
+    character_keep_image: str | None = None,
     vision_images: list[Any] | None = None,
     skip_default_prompts: bool = False,
     extra_system_prompt: str | None = None,
     token: str = "",
 ):
     """使用 LLM 生成高级参数并生成图片。
-    
+
     Args:
         instructions: 用户的描述指令
         config: 配置
@@ -189,6 +192,7 @@ async def llm_generate_image(
         event=event,
         i2i_image=i2i_image,
         vibe_transfer_images=vibe_transfer_images,
+        character_keep_image=character_keep_image,
         vision_images=vision_images,
         skip_default_prompts=skip_default_prompts,
         extra_system_prompt=extra_system_prompt,
@@ -199,7 +203,7 @@ async def llm_generate_image(
     except Exception as e:
         logger.debug("Failed to generate image", exc_info=e)
         raise ReturnToLLMError(
-            f"Failed to generate image: \n{format_readable_error(e)}"
+            f"Failed to generate image: \n{format_readable_error(e)}",
         ) from e
 
 
@@ -210,6 +214,7 @@ async def llm_generate_advanced_req(
     event: AstrMessageEvent,
     i2i_image: str | None = None,
     vibe_transfer_images: list[str] | None = None,
+    character_keep_image: str | None = None,
     vision_images: list[Any] | None = None,
     skip_default_prompts: bool = False,
     extra_system_prompt: str | None = None,
@@ -234,16 +239,18 @@ async def llm_generate_advanced_req(
     system_prompt = ADVANCED_PROMPT_PATH.read_text("u8")
     # 使用 replace 而不是 format，避免误解析提示词中的其他花括号内容
     system_prompt = (
-        system_prompt
-        .replace("{schema}", GENERATE_IMAGE_ADVANCED_SCHEMA_TXT)
+        system_prompt.replace("{schema}", GENERATE_IMAGE_ADVANCED_SCHEMA_TXT)
         .replace("{default_size}", get_size_from_config(config, "default"))
         .replace("{portrait_size}", get_size_from_config(config, "portrait"))
         .replace("{landscape_size}", get_size_from_config(config, "landscape"))
         .replace("{square_size}", get_size_from_config(config, "square"))
         .replace("{has_i2i_image}", "Yes" if i2i_image else "No")
-        .replace("{vibe_transfer_image_count}", str(
-            len(vibe_transfer_images) if vibe_transfer_images else 0
-        ))
+        .replace(
+            "{vibe_transfer_image_count}",
+            str(
+                len(vibe_transfer_images) if vibe_transfer_images else 0,
+            ),
+        )
     )
     if extra_system_prompt and extra_system_prompt.strip():
         system_prompt = f"{system_prompt}\n\n{extra_system_prompt.strip()}"
@@ -253,8 +260,10 @@ async def llm_generate_advanced_req(
         parts: list[Any] = [TextPart(text=instructions)]
         # 目前只取 1 张图作为识图参考（减少 token/体积），但会在日志里打印实际传入数量
         for i, img in enumerate(vision_images[:1]):
-            data_uri = await resolve_image(img)
-            header = data_uri.split(",", 1)[0] if isinstance(data_uri, str) else "<non-str>"
+            data_uri = img if isinstance(img, str) else await resolve_image(img)
+            header = (
+                data_uri.split(",", 1)[0] if isinstance(data_uri, str) else "<non-str>"
+            )
             logger.info(
                 "[nai][vision] attach_image id=%s header=%s uri_len=%s",
                 f"img{i}",
@@ -263,15 +272,19 @@ async def llm_generate_advanced_req(
             )
             if isinstance(data_uri, str) and "base64://" in data_uri:
                 logger.warning(
-                    "[nai][vision] image data contains unexpected 'base64://' prefix; provider may ignore it"
+                    "[nai][vision] image data contains unexpected 'base64://' prefix; provider may ignore it",
                 )
             parts.append(
-                ImageURLPart(image_url=ImageURLPart.ImageURL(url=data_uri, id=f"img{i}"))
+                ImageURLPart(
+                    image_url=ImageURLPart.ImageURL(url=data_uri, id=f"img{i}")
+                ),
             )
         user_content = parts
     else:
         if config.llm.enable_vision and not vision_images:
-            logger.debug("[nai][vision] enable_vision is on but no images provided; using text-only")
+            logger.debug(
+                "[nai][vision] enable_vision is on but no images provided; using text-only"
+            )
         user_content = instructions
 
     contexts = [
@@ -308,12 +321,16 @@ async def llm_generate_advanced_req(
             logger.debug("Inner LLM call failed", exc_info=e)
             raise ReturnToLLMError(
                 f"Failed to call inner LLM for advanced parameter generation: \n"
-                f"{format_readable_error(e)}"
+                f"{format_readable_error(e)}",
             ) from e
 
         raw_output = llm_resp.completion_text or ""
         preview_limit = 500
-        preview = raw_output if len(raw_output) <= preview_limit else raw_output[:preview_limit] + "...(truncated)"
+        preview = (
+            raw_output
+            if len(raw_output) <= preview_limit
+            else raw_output[:preview_limit] + "...(truncated)"
+        )
         logger.info("[nai] inner llm output (%s chars): %s", len(raw_output), preview)
         try:
             return await llm_generate_prepare_req(
@@ -321,15 +338,24 @@ async def llm_generate_advanced_req(
                 config,
                 i2i_image,
                 vibe_transfer_images,
+                character_keep_image,
                 skip_default_prompts=skip_default_prompts,
             )
         except ReturnToLLMError as e:
             logger.debug(f"{e}")
-            sys_m = f"Your response seems incorrect. Correct the error and try again.\n{e}"
+            sys_m = (
+                f"Your response seems incorrect. Correct the error and try again.\n{e}"
+            )
             contexts.append(Message(role="assistant", content=llm_resp.completion_text))
             contexts.append(Message(role="user", content=sys_m))
             continue
 
     raise ReturnToLLMError(
-        "Inner LLM failed to provide valid output after multiple attempts."
+        "Inner LLM failed to provide valid output after multiple attempts.",
     )
+
+
+def image_params_for_log(image_params: ResolvedImageParams) -> str:
+    """Format resolved image params for debug logs."""
+    summary = image_params.summary()
+    return ", ".join(summary) if summary else "none"

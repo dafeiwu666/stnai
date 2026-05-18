@@ -8,6 +8,7 @@ from astrbot import logger
 from astrbot.api.message_components import Image, Node, Nodes
 
 from .data_source import GenerateError, wrapped_generate
+from .image_params import iter_key_values, resolve_image_params
 from .llm import ReturnToLLMError, llm_generate_advanced_req
 from .llm_utils import format_readable_error
 from .utils import extract_batch_count_from_texts
@@ -36,7 +37,9 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
             return
 
     raw_input = event.message_str.removeprefix("nai画图").strip()
-    preset_names, other_params, cs_names = plugin._parse_presets_from_params(raw_input)
+    preset_names, other_params, cs_names, image_params = (
+        plugin._parse_presets_from_params(raw_input)
+    )
     preset_names = plugin._apply_default_preset_to_names(preset_names)
 
     description = other_params.get("ds", "")
@@ -45,7 +48,9 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
     if cs_names:
         for cs_name in cs_names:
             if not plugin.cs_store.exists(user_id, cs_name):
-                yield event.plain_result(f"角色保持 {cs_name} 不存在，请先使用 /cs 创建")
+                yield event.plain_result(
+                    f"角色保持 {cs_name} 不存在，请先使用 /cs 创建"
+                )
                 return
             cs_content_parts.append(plugin.cs_store.read(user_id, cs_name))
     cs_content = "\n\n".join(cs_content_parts)
@@ -57,22 +62,31 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
         else:
             description = f"参考：{reply_text}"
 
-    vision_images = [x for x in event.message_obj.message if isinstance(x, Image)]
-
     preset_contents: list[str] = []
     for preset_name in preset_names:
         preset = plugin.preset_manager.get_preset(preset_name)
         if preset is None:
-            yield event.plain_result(f"预设 {preset_name} 不存在，使用 nai预设列表 查看可用预设")
+            yield event.plain_result(
+                f"预设 {preset_name} 不存在，使用 nai预设列表 查看可用预设"
+            )
             return
         preset_contents.append(preset.content)
 
+    uploaded_images = [x for x in event.message_obj.message if isinstance(x, Image)]
+    try:
+        resolved_images = await resolve_image_params(
+            [*image_params, *iter_key_values(preset_contents)],
+            uploaded_images,
+        )
+    except Exception as e:  # noqa: BLE001
+        yield event.plain_result(f"图片参数解析失败：{format_readable_error(e)}")
+        return
+
+    vision_images = resolved_images.vision_images
+
     if not preset_contents and not description and not vision_images:
         yield event.plain_result(
-            "请输入画图描述，格式：\n"
-            "nai画图\n"
-            "s1=猫娘\n"
-            "ds=画一个可爱的女孩"
+            "请输入画图描述，格式：\nnai画图\ns1=猫娘\nds=画一个可爱的女孩",
         )
         return
 
@@ -91,14 +105,14 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
     full_description = "\n\n".join(full_description_parts)
 
     logger.debug(
-        f"[nai画图] presets={preset_names}, description={description[:50] if description else 'None'}"
+        f"[nai画图] presets={preset_names}, description={description[:50] if description else 'None'}",
     )
 
     if quota_enabled and not is_whitelisted:
         quota = plugin.user_manager.get_quota(user_id)
         if quota < batch_count:
             yield event.plain_result(
-                f"你的画图次数不足，当前剩余 {quota} 次，本次需要 {batch_count} 次"
+                f"你的画图次数不足，当前剩余 {quota} 次，本次需要 {batch_count} 次",
             )
             return
 
@@ -107,7 +121,9 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
         is_whitelisted=is_whitelisted,
         max_queue_size=plugin.config.request.max_queue_size,
         max_concurrent=plugin.config.request.max_concurrent,
-        consume_quota=(lambda: plugin.user_manager.consume_quota_n(user_id, batch_count))
+        consume_quota=(
+            lambda: plugin.user_manager.consume_quota_n(user_id, batch_count)
+        )
         if quota_enabled and not is_whitelisted
         else None,
     )
@@ -117,7 +133,7 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
             yield event.plain_result("你的上一张还没画完呢~")
         elif res.reason == "queue_full":
             yield event.plain_result(
-                f"⚠️ 队列已满（{plugin.config.request.max_queue_size}），请稍后再试"
+                f"⚠️ 队列已满（{plugin.config.request.max_queue_size}），请稍后再试",
             )
         elif res.reason == "quota":
             yield event.plain_result("你的画图次数已用完，请/nai签到获取额度")
@@ -134,7 +150,7 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
         sem = plugin._ensure_semaphore()
         async with sem:
             await plugin._queue.mark_wait_finished(
-                max_concurrent=plugin.config.request.max_concurrent
+                max_concurrent=plugin.config.request.max_concurrent,
             )
 
             images: list[bytes] = []
@@ -144,12 +160,15 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
                     config=plugin.config,
                     ctx=plugin.context,
                     event=event,
+                    i2i_image=resolved_images.i2i_image,
+                    vibe_transfer_images=resolved_images.vibe_transfer_images,
+                    character_keep_image=resolved_images.character_keep_image,
                     vision_images=vision_images,
                     skip_default_prompts=bool(preset_contents),
                     extra_system_prompt=cs_content,
                 )
 
-                async def _do_generate():
+                async def _do_generate(req=req):
                     nonlocal token
                     token = plugin._get_next_token()
                     return await wrapped_generate(req, plugin.config, token=token)
@@ -167,7 +186,7 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
                         content=[Image.fromBytes(img)],
                     )
                     for img in images
-                ]
+                ],
             )
             yield event.chain_result([nodes])
         else:
@@ -176,7 +195,7 @@ async def handle_nai_draw(plugin, event, waiting_replies: list[str]) -> AsyncIte
         yield event.plain_result(f"画图失败：{e}")
     except asyncio.CancelledError:
         await plugin._queue.mark_wait_finished(
-            max_concurrent=plugin.config.request.max_concurrent
+            max_concurrent=plugin.config.request.max_concurrent,
         )
         raise
     except Exception as e:  # noqa: BLE001
@@ -211,7 +230,7 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
     except Exception as e:  # noqa: BLE001
         logger.debug("Failed to parse args", exc_info=e)
         yield event.plain_result(
-            f"你提供的参数貌似有些问题呢 xwx\n{format_readable_error(e)}"
+            f"你提供的参数貌似有些问题呢 xwx\n{format_readable_error(e)}",
         )
         return
 
@@ -221,7 +240,9 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
             try:
                 image_paths = await plugin._render_markdown_to_images(help_msg)
                 if image_paths:
-                    yield event.chain_result([Image.fromFileSystem(p) for p in image_paths])
+                    yield event.chain_result(
+                        [Image.fromFileSystem(p) for p in image_paths]
+                    )
                 else:
                     yield event.image_result(await plugin.text_to_image(help_msg))
             except Exception:
@@ -241,7 +262,7 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
         quota = plugin.user_manager.get_quota(user_id)
         if quota < batch_count:
             yield event.plain_result(
-                f"你的画图次数不足，当前剩余 {quota} 次，本次需要 {batch_count} 次"
+                f"你的画图次数不足，当前剩余 {quota} 次，本次需要 {batch_count} 次",
             )
             return
 
@@ -250,7 +271,9 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
         is_whitelisted=is_whitelisted,
         max_queue_size=plugin.config.request.max_queue_size,
         max_concurrent=plugin.config.request.max_concurrent,
-        consume_quota=(lambda: plugin.user_manager.consume_quota_n(user_id, batch_count))
+        consume_quota=(
+            lambda: plugin.user_manager.consume_quota_n(user_id, batch_count)
+        )
         if quota_enabled and not is_whitelisted
         else None,
     )
@@ -260,7 +283,7 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
             yield event.plain_result("你的上一张还没画完呢~")
         elif res.reason == "queue_full":
             yield event.plain_result(
-                f"⚠️ 队列已满（{plugin.config.request.max_queue_size}），请稍后再试"
+                f"⚠️ 队列已满（{plugin.config.request.max_queue_size}），请稍后再试",
             )
         elif res.reason == "quota":
             yield event.plain_result("你的画图次数已用完，请/nai签到获取额度")
@@ -277,7 +300,7 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
         sem = plugin._ensure_semaphore()
         async with sem:
             await plugin._queue.mark_wait_finished(
-                max_concurrent=plugin.config.request.max_concurrent
+                max_concurrent=plugin.config.request.max_concurrent,
             )
 
             req.token = token
@@ -303,7 +326,7 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
                         content=[Image.fromBytes(img)],
                     )
                     for img in images
-                ]
+                ],
             )
             yield event.chain_result([nodes])
         else:
@@ -313,11 +336,11 @@ async def handle_cmd_nai(plugin, event, waiting_replies: list[str]) -> AsyncIter
         readable = format_readable_error(e)
         extra = f" ({readable})" if readable else ""
         yield event.plain_result(
-            f"呱！画图的时候好像出现了点问题 xwx{extra}"
+            f"呱！画图的时候好像出现了点问题 xwx{extra}",
         )
     except asyncio.CancelledError:
         await plugin._queue.mark_wait_finished(
-            max_concurrent=plugin.config.request.max_concurrent
+            max_concurrent=plugin.config.request.max_concurrent,
         )
         raise
     except Exception:  # noqa: BLE001

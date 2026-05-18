@@ -2,13 +2,14 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any
 
 from astrbot import logger
 from astrbot.api.message_components import Image, Node, Nodes
 from astrbot.api.provider import LLMResponse
 
 from .data_source import wrapped_generate
+from .image_io import resolve_image
+from .image_params import iter_key_values, resolve_image_params
 from .llm import llm_generate_advanced_req
 from .llm_utils import format_readable_error
 from .utils import extract_batch_count_from_texts
@@ -16,11 +17,78 @@ from .utils import extract_batch_count_from_texts
 
 async def handle_auto_draw_off(plugin, event) -> AsyncIterator:
     plugin.auto_draw_info[event.unified_msg_origin] = None
+    await plugin._auto_draw_store.asave_from_runtime(plugin.auto_draw_info)
     yield event.plain_result("❌ 自动画图已关闭")
 
 
-async def handle_auto_draw_on(plugin, event) -> AsyncIterator:
+async def _enable_auto_draw(
+    plugin, event, raw_input: str, require_preset: bool
+) -> tuple[bool, str]:
     umo = event.unified_msg_origin
+    user_id = plugin._get_user_id(event)
+    preset_names, _other_params, cs_names, image_params = (
+        plugin._parse_presets_from_params(raw_input)
+    )
+    preset_names = plugin._apply_default_preset_to_names(preset_names)
+    if require_preset and not preset_names:
+        return False, "请使用键值对格式设置预设，例如：\nnai自动画图\ns1=猫娘"
+
+    preset_contents: list[str] = []
+    for preset_name in preset_names:
+        preset = plugin.preset_manager.get_preset(preset_name)
+        if preset is None:
+            return False, f"预设 {preset_name} 不存在，使用 nai预设列表 查看可用预设"
+        preset_contents.append(preset.content)
+
+    if cs_names:
+        for cs_name in cs_names:
+            if not plugin.cs_store.exists(user_id, cs_name):
+                return False, f"角色保持 {cs_name} 不存在，请先使用 /cs 创建"
+
+    uploaded_images = [x for x in event.message_obj.message if isinstance(x, Image)]
+    try:
+        resolved_images = await resolve_image_params(
+            [*image_params, *iter_key_values(preset_contents)],
+            uploaded_images,
+        )
+    except Exception as e:  # noqa: BLE001
+        return False, f"图片参数解析失败：{format_readable_error(e)}"
+
+    vision_images = [
+        await resolve_image(img) if isinstance(img, Image) else img
+        for img in resolved_images.vision_images
+    ]
+
+    plugin.auto_draw_info[umo] = {
+        "enabled": True,
+        "presets": preset_names,
+        "opener_user_id": user_id,
+        "cs_names": cs_names,
+        "i2i_image": resolved_images.i2i_image,
+        "vibe_transfer_images": resolved_images.vibe_transfer_images,
+        "character_keep_image": resolved_images.character_keep_image,
+        "vision_images": vision_images,
+    }
+    await plugin._auto_draw_store.asave_from_runtime(plugin.auto_draw_info)
+
+    image_summary = resolved_images.summary()
+    extra = f"\n图片参数：{', '.join(image_summary)}" if image_summary else ""
+    if preset_names:
+        preset_str = ", ".join(f"#{name}" for name in preset_names)
+        return True, (
+            f"✅ 自动画图已开启\n"
+            f"使用预设：{preset_str}{extra}\n"
+            f"主 AI 的回复将与预设内容结合后生成图片\n"
+            f"⚠️ 后续触发的画图将消耗你的额度"
+        )
+    return True, (
+        f"✅ 自动画图已开启{extra}\n"
+        f"主 AI 的回复将被自动分析生成图片\n"
+        f"⚠️ 后续触发的画图将消耗你的额度"
+    )
+
+
+async def handle_auto_draw_on(plugin, event) -> AsyncIterator:
     user_id = plugin._get_user_id(event)
 
     if plugin.user_manager.is_blacklisted(user_id):
@@ -28,42 +96,10 @@ async def handle_auto_draw_on(plugin, event) -> AsyncIterator:
         return
 
     raw_input = event.message_str.removeprefix("nai自动画图开").strip()
-    preset_names, other_params, cs_names = plugin._parse_presets_from_params(raw_input)
-    preset_names = plugin._apply_default_preset_to_names(preset_names)
-
-    for preset_name in preset_names:
-        preset = plugin.preset_manager.get_preset(preset_name)
-        if preset is None:
-            yield event.plain_result(f"预设 {preset_name} 不存在，使用 nai预设列表 查看可用预设")
-            return
-
-    if cs_names:
-        for cs_name in cs_names:
-            if not plugin.cs_store.exists(user_id, cs_name):
-                yield event.plain_result(f"角色保持 {cs_name} 不存在，请先使用 /cs 创建")
-                return
-
-    plugin.auto_draw_info[umo] = {
-        "enabled": True,
-        "presets": preset_names,
-        "opener_user_id": user_id,
-        "cs_names": cs_names,
-    }
-
-    if preset_names:
-        preset_str = ", ".join(f"#{name}" for name in preset_names)
-        yield event.plain_result(
-            f"✅ 自动画图已开启\n"
-            f"使用预设：{preset_str}\n"
-            f"主 AI 的回复将与预设内容结合后生成图片\n"
-            f"⚠️ 后续触发的画图将消耗你的额度"
-        )
-    else:
-        yield event.plain_result(
-            "✅ 自动画图已开启\n"
-            "主 AI 的回复将被自动分析生成图片\n"
-            "⚠️ 后续触发的画图将消耗你的额度"
-        )
+    _ok, message = await _enable_auto_draw(
+        plugin, event, raw_input, require_preset=False
+    )
+    yield event.plain_result(message)
 
 
 async def handle_auto_draw(plugin, event) -> AsyncIterator:
@@ -76,44 +112,16 @@ async def handle_auto_draw(plugin, event) -> AsyncIterator:
             yield event.plain_result("你已被加入黑名单，无法开启自动画图")
             return
 
-        preset_names, other_params, cs_names = plugin._parse_presets_from_params(raw_input)
-        preset_names = plugin._apply_default_preset_to_names(preset_names)
-        if not preset_names:
-            yield event.plain_result("请使用键值对格式设置预设，例如：\nnai自动画图\ns1=猫娘")
-            return
-
-        for preset_name in preset_names:
-            preset = plugin.preset_manager.get_preset(preset_name)
-            if preset is None:
-                yield event.plain_result(f"预设 {preset_name} 不存在，使用 nai预设列表 查看可用预设")
-                return
-
-        if cs_names:
-            for cs_name in cs_names:
-                if not plugin.cs_store.exists(user_id, cs_name):
-                    yield event.plain_result(f"角色保持 {cs_name} 不存在，请先使用 /cs 创建")
-                    return
-
-        plugin.auto_draw_info[umo] = {
-            "enabled": True,
-            "presets": preset_names,
-            "opener_user_id": user_id,
-            "cs_names": cs_names,
-        }
-
-        preset_str = ", ".join(f"#{name}" for name in preset_names)
-        yield event.plain_result(
-            f"✅ 自动画图已开启\n"
-            f"使用预设：{preset_str}\n"
-            f"⚠️ 后续触发的画图将消耗你的额度"
+        _ok, message = await _enable_auto_draw(
+            plugin, event, raw_input, require_preset=True
         )
+        yield event.plain_result(message)
         return
 
     current = plugin.auto_draw_info.get(umo)
     if current is None:
         yield event.plain_result(
-            "当前会话自动画图状态：❌ 关闭\n\n"
-            "使用 nai自动画图开 来开启自动画图"
+            "当前会话自动画图状态：❌ 关闭\n\n使用 nai自动画图开 来开启自动画图",
         )
         return
 
@@ -135,6 +143,16 @@ async def handle_auto_draw(plugin, event) -> AsyncIterator:
         status_parts.append("未使用预设")
     if cs_names:
         status_parts.append(f"角色保持：{', '.join(cs_names)}")
+    image_parts: list[str] = []
+    if current.get("i2i_image"):
+        image_parts.append("图生图")
+    vibe_count = len(current.get("vibe_transfer_images") or [])
+    if vibe_count:
+        image_parts.append(f"氛围转移×{vibe_count}")
+    if current.get("character_keep_image"):
+        image_parts.append("角色保持图片")
+    if image_parts:
+        status_parts.append(f"图片参数：{', '.join(image_parts)}")
     status_parts.append(f"开启者：{opener_id}")
     if is_whitelisted:
         status_parts.append("额度：无限（白名单）")
@@ -162,27 +180,32 @@ async def handle_llm_response_auto_draw(plugin, event, resp: LLMResponse):
     if not plugin.config.request.tokens:
         return
 
-    ai_response = resp.completion_text if hasattr(resp, "completion_text") else str(resp)
+    ai_response = (
+        resp.completion_text if hasattr(resp, "completion_text") else str(resp)
+    )
     if not ai_response or len(ai_response.strip()) < 10:
         return
 
     if plugin.user_manager.is_blacklisted(opener_user_id):
-        logger.debug(f"[nai] Auto draw: opener {opener_user_id} is blacklisted, skipping")
+        logger.debug(
+            f"[nai] Auto draw: opener {opener_user_id} is blacklisted, skipping"
+        )
         return
 
     is_whitelisted = plugin.user_manager.is_whitelisted(opener_user_id)
     quota_enabled = plugin.config.quota.enable_quota
 
     if quota_enabled and not is_whitelisted:
-        can_use, reason = plugin.user_manager.can_use(opener_user_id)
+        can_use, _reason = plugin.user_manager.can_use(opener_user_id)
         if not can_use:
             await event.send(
                 event.plain_result(
                     "⚠️ 自动画图已暂停：开启者额度不足\n"
-                    f"开启者 {opener_user_id} 的额度已用完，请签到获取额度后重新开启"
-                )
+                    f"开启者 {opener_user_id} 的额度已用完，请签到获取额度后重新开启",
+                ),
             )
             plugin.auto_draw_info[umo] = None
+            await plugin._auto_draw_store.asave_from_runtime(plugin.auto_draw_info)
             return
 
     preset_contents: list[str] = []
@@ -193,7 +216,7 @@ async def handle_llm_response_auto_draw(plugin, event, resp: LLMResponse):
 
     logger.debug(
         f"[nai] Auto draw: generating from response ({len(ai_response)} chars), "
-        f"presets={presets}, opener={opener_user_id}"
+        f"presets={presets}, opener={opener_user_id}",
     )
 
     asyncio.create_task(
@@ -205,7 +228,8 @@ async def handle_llm_response_auto_draw(plugin, event, resp: LLMResponse):
             opener_user_id,
             is_whitelisted,
             cs_names,
-        )
+            auto_info,
+        ),
     )
 
 
@@ -217,6 +241,7 @@ async def _auto_draw_generate(
     opener_user_id: str,
     is_whitelisted: bool,
     cs_names: list[str],
+    auto_info: dict,
 ):
     quota_enabled = plugin.config.quota.enable_quota
     umo = event.unified_msg_origin
@@ -227,7 +252,9 @@ async def _auto_draw_generate(
             max_n=plugin.config.request.max_n,
         )
     except Exception as e:  # noqa: BLE001
-        await event.send(event.plain_result(f"🎨 自动画图失败：{format_readable_error(e)}"))
+        await event.send(
+            event.plain_result(f"🎨 自动画图失败：{format_readable_error(e)}")
+        )
         return
 
     if quota_enabled and not is_whitelisted:
@@ -236,10 +263,11 @@ async def _auto_draw_generate(
             await event.send(
                 event.plain_result(
                     "⚠️ 自动画图已暂停：开启者额度不足\n"
-                    f"开启者 {opener_user_id} 的额度不足，本次需要 {batch_count} 次"
-                )
+                    f"开启者 {opener_user_id} 的额度不足，本次需要 {batch_count} 次",
+                ),
             )
             plugin.auto_draw_info[umo] = None
+            await plugin._auto_draw_store.asave_from_runtime(plugin.auto_draw_info)
             return
 
     res = await plugin._queue.reserve(
@@ -247,7 +275,9 @@ async def _auto_draw_generate(
         is_whitelisted=is_whitelisted,
         max_queue_size=plugin.config.request.max_queue_size,
         max_concurrent=plugin.config.request.max_concurrent,
-        consume_quota=(lambda: plugin.user_manager.consume_quota_n(opener_user_id, batch_count))
+        consume_quota=(
+            lambda: plugin.user_manager.consume_quota_n(opener_user_id, batch_count)
+        )
         if quota_enabled and not is_whitelisted
         else None,
     )
@@ -255,27 +285,31 @@ async def _auto_draw_generate(
     close_auto = False
     if not res.ok:
         if res.reason == "inflight":
-            await event.send(event.plain_result("🎨 自动画图跳过：你的上一张还没画完呢~"))
+            await event.send(
+                event.plain_result("🎨 自动画图跳过：你的上一张还没画完呢~")
+            )
         elif res.reason == "queue_full":
             await event.send(
                 event.plain_result(
-                    f"⚠️ 自动画图跳过：队列已满（{plugin.config.request.max_queue_size}）"
-                )
+                    f"⚠️ 自动画图跳过：队列已满（{plugin.config.request.max_queue_size}）",
+                ),
             )
         elif res.reason == "quota":
             close_auto = True
             await event.send(
                 event.plain_result(
                     "⚠️ 自动画图已暂停：开启者额度不足\n"
-                    f"开启者 {opener_user_id} 的额度已用完，请签到获取额度后重新开启"
-                )
+                    f"开启者 {opener_user_id} 的额度已用完，请签到获取额度后重新开启",
+                ),
             )
         if close_auto:
             plugin.auto_draw_info[umo] = None
+            await plugin._auto_draw_store.asave_from_runtime(plugin.auto_draw_info)
         return
 
     if close_auto:
         plugin.auto_draw_info[umo] = None
+        await plugin._auto_draw_store.asave_from_runtime(plugin.auto_draw_info)
 
     reserved_user = res.reserved_user
     queue_total = res.queue_total
@@ -290,13 +324,15 @@ async def _auto_draw_generate(
             for cs_name in cs_names:
                 if not plugin.cs_store.exists(opener_user_id, cs_name):
                     await event.send(
-                        event.plain_result(f"🎨 自动画图失败：角色保持 {cs_name} 不存在")
+                        event.plain_result(
+                            f"🎨 自动画图失败：角色保持 {cs_name} 不存在"
+                        ),
                     )
                     return
                 cs_content_parts.append(plugin.cs_store.read(opener_user_id, cs_name))
         cs_content = "\n\n".join(cs_content_parts)
-        full_parts = list(reversed(preset_contents)) + [ai_response_with_prefix]
-        vision_images = [x for x in event.message_obj.message if isinstance(x, Image)]
+        full_parts = [*reversed(preset_contents), ai_response_with_prefix]
+        vision_images = list(auto_info.get("vision_images") or [])
         full_instructions = "\n\n".join(full_parts)
 
         await event.send(event.plain_result(f"🎨 自动画图中...{queue_status}"))
@@ -304,7 +340,7 @@ async def _auto_draw_generate(
         sem = plugin._ensure_semaphore()
         async with sem:
             await plugin._queue.mark_wait_finished(
-                max_concurrent=plugin.config.request.max_concurrent
+                max_concurrent=plugin.config.request.max_concurrent,
             )
 
             images: list[bytes] = []
@@ -314,12 +350,15 @@ async def _auto_draw_generate(
                     config=plugin.config,
                     ctx=plugin.context,
                     event=event,
+                    i2i_image=auto_info.get("i2i_image") or None,
+                    vibe_transfer_images=auto_info.get("vibe_transfer_images") or [],
+                    character_keep_image=auto_info.get("character_keep_image") or None,
                     vision_images=vision_images,
                     skip_default_prompts=bool(preset_contents),
                     extra_system_prompt=cs_content,
                 )
 
-                async def _do_generate():
+                async def _do_generate(req=req):
                     nonlocal token
                     token = plugin._get_next_token()
                     return await wrapped_generate(req, plugin.config, token=token)
@@ -337,20 +376,24 @@ async def _auto_draw_generate(
                         content=[Image.fromBytes(img)],
                     )
                     for img in images
-                ]
+                ],
             )
             await event.send(event.chain_result([nodes]))
         else:
-            await event.send(event.chain_result([Image.fromBytes(img) for img in images]))
+            await event.send(
+                event.chain_result([Image.fromBytes(img) for img in images])
+            )
 
     except asyncio.CancelledError:
         await plugin._queue.mark_wait_finished(
-            max_concurrent=plugin.config.request.max_concurrent
+            max_concurrent=plugin.config.request.max_concurrent,
         )
         raise
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Auto draw generation failed: {e}")
-        await event.send(event.plain_result(f"🎨 自动画图失败：{format_readable_error(e)}"))
+        await event.send(
+            event.plain_result(f"🎨 自动画图失败：{format_readable_error(e)}")
+        )
     finally:
         await plugin._queue.release(
             user_id=opener_user_id,

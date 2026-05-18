@@ -2,7 +2,6 @@
 
 import base64
 import io
-from typing import Iterable
 
 from PIL import Image as PILImage
 

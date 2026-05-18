@@ -7,10 +7,15 @@ from typing import (
     Protocol,
     TypeVar,
 )
+
 from typing_extensions import TypedDict, Unpack
 
 from astrbot.core.message.components import BaseMessageComponent, Image
 
+from .image_io import (
+    resolve_image,
+    resolve_image_as_jpeg,
+)
 from .models import (
     AVAILABLE_DOTH,
     AVAILABLE_MODELS,
@@ -18,11 +23,6 @@ from .models import (
     AVAILABLE_POSITIONS,
     AVAILABLE_SAMPLERS,
     Req,
-)
-from .image_io import (
-    convert_to_jpeg_for_character_keep,
-    resolve_image,
-    resolve_image_as_jpeg,
 )
 
 if TYPE_CHECKING:
@@ -177,7 +177,11 @@ class ParamAssembler(Generic[T, TC]):
         return assembler
 
     async def apply(
-        self, input_params: list[tuple[str, str]], images: list[Any], ctx: TC, is_whitelisted: bool = False
+        self,
+        input_params: list[tuple[str, str]],
+        images: list[Any],
+        ctx: TC,
+        is_whitelisted: bool = False,
     ) -> T:
         if not self.transformer_func:
             raise RuntimeError("No transformer function defined")
@@ -242,7 +246,6 @@ def parse_params(raw_params: str) -> Generator[tuple[str, str], None, None]:
         else:
             # 强制键值对格式
             raise ValueError(f"参数格式错误：'{line}'，请使用键值对格式，例如：tag=xxx")
-
 
 
 def set_param(data: dict[str, Any], key: str, value: Any) -> None:
@@ -342,9 +345,12 @@ def format_list(
 
 # 核心提示词参数，始终允许使用，不受权限配置限制
 CORE_PROMPT_FIELDS = {
-    "tag", "negative", 
-    "prepend_tag", "append_tag", 
-    "prepend_negative", "append_negative"
+    "tag",
+    "negative",
+    "prepend_tag",
+    "append_tag",
+    "prepend_negative",
+    "append_negative",
 }
 
 
@@ -358,12 +364,12 @@ async def start_process(
 ):
     # 从 data 中获取 is_whitelisted 标志
     is_whitelisted = data.get("_is_whitelisted", False)
-    
+
     # 如果用户不是白名单，检查是否使用了白名单专用字段
     if not is_whitelisted:
         # 获取用户实际使用的参数键（去重）
         used_keys = {key for key, _ in input_params}
-        
+
         # 检查是否使用了白名单专用字段
         for key in used_keys:
             # 核心提示词参数始终允许
@@ -448,8 +454,6 @@ async def apply_append_negative(value: str, data: dict[str, Any], **_):
 )
 async def apply_artist(value: str, data: dict[str, Any], **_):
     set_param(data, "artist", value)
-
-
 
 
 @req_model_assembler.applier(
@@ -697,34 +701,36 @@ async def apply_role(value: str, data: dict[str, Any], ctx: "Config", **_):
             "role 参数格式错误，正确格式：role=位置|正向提示词|反向提示词(可选)\n"
             "例如：role=C3|1girl, cute"
         )
-    
+
     position = parts[0].strip().upper()
     prompt = parts[1].strip()
     negative_prompt = parts[2].strip() if len(parts) > 2 else ""
-    
+
     # 验证位置
     if position not in AVAILABLE_POSITIONS:
         raise ValueError(
             f"位置 `{position}` 无效，可用位置：A1-E5\n"
             "A-E 为横向（左→右），1-5 为纵向（上→下）"
         )
-    
+
     # 验证提示词
     if not prompt:
         raise ValueError("角色的正向提示词不能为空")
-    
+
     # 初始化 addition 和 multi_role_list
     if "addition" not in data:
         data["addition"] = {}
     if "multi_role_list" not in data["addition"]:
         data["addition"]["multi_role_list"] = []
-    
+
     # 添加角色
-    data["addition"]["multi_role_list"].append({
-        "prompt": prompt,
-        "negative_prompt": negative_prompt,
-        "position": position,
-    })
+    data["addition"]["multi_role_list"].append(
+        {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "position": position,
+        }
+    )
 
 
 @req_model_assembler.applier(
@@ -739,18 +745,20 @@ async def apply_role(value: str, data: dict[str, Any], ctx: "Config", **_):
         "- `character_keep_strength`：参考强度（0-1，默认0.5）"
     ),
 )
-async def apply_character_keep(value: str, data: dict[str, Any], images: list[Image], **_):
+async def apply_character_keep(
+    value: str, data: dict[str, Any], images: list[Image], **_
+):
     if value.lower() in ("false", "0", "off", "关"):
         return
     if "addition" not in data:
         data["addition"] = {}
     if data["addition"].get("character_keep", {}).get("base64"):
         raise ValueError("Param `character_keep` already set")
-    
+
     # 获取图片并转换为JPEG格式（角色保持功能要求JPEG格式）
     image = pop_from_images(images)
     image_b64 = await resolve_image_as_jpeg(image)
-    
+
     # 初始化或更新 character_keep
     if "character_keep" not in data["addition"]:
         data["addition"]["character_keep"] = {}
@@ -770,7 +778,7 @@ async def apply_character_keep_vibe(value: str, data: dict[str, Any], **_):
         not data["addition"].get("character_keep", {}).get("base64")
     ):
         raise ValueError("请先使用 character_keep 参数引用图片")
-    
+
     # 解析布尔值
     value_lower = value.lower().strip()
     if value_lower in ("true", "1", "yes", "是"):
@@ -778,10 +786,8 @@ async def apply_character_keep_vibe(value: str, data: dict[str, Any], **_):
     elif value_lower in ("false", "0", "no", "否", ""):
         keep_vibe = False
     else:
-        raise ValueError(
-            f"无效的值 `{value}`，请使用 true 或 false"
-        )
-    
+        raise ValueError(f"无效的值 `{value}`，请使用 true 或 false")
+
     data["addition"]["character_keep"]["keep_vibe"] = keep_vibe
 
 
@@ -799,16 +805,17 @@ async def apply_character_keep_strength(value: str, data: dict[str, Any], **_):
         not data["addition"].get("character_keep", {}).get("base64")
     ):
         raise ValueError("请先使用 character_keep 参数引用图片")
-    
+
     try:
         strength = float(value)
     except ValueError:
         raise ValueError(f"无效的值 `{value}`，请输入 0-1 之间的数字")
-    
+
     if not (0 <= strength <= 1):
         raise ValueError(f"参考强度 `{strength}` 超出范围，请输入 0-1 之间的数字")
-    
+
     data["addition"]["character_keep"]["strength"] = strength
+
 
 def complete_defaults(data: dict[str, Any], ctx: "Config"):
     # token 由调用方在 wrapped_generate 时动态设置，不在这里设置
@@ -848,7 +855,7 @@ async def end_process(data: dict[str, Any], ctx: "Config", **_):
     append_tag = data.pop("append_tag", "").strip()
     prepend_negative = data.pop("prepend_negative", "").strip()
     append_negative = data.pop("append_negative", "").strip()
-    
+
     # 拼接正向提示词：prepend_tag + tag + append_tag
     tag_parts = []
     if prepend_tag:
@@ -857,13 +864,13 @@ async def end_process(data: dict[str, Any], ctx: "Config", **_):
         tag_parts.append(data["tag"].strip())
     if append_tag:
         tag_parts.append(append_tag)
-    
+
     # 如果没有任何正向提示词，则使用默认值
     if tag_parts:
         data["tag"] = ", ".join(tag_parts)
     else:
         data["tag"] = ctx.defaults.prompt
-    
+
     # 拼接负面提示词：prepend_negative + negative + append_negative
     negative_parts = []
     if prepend_negative:
@@ -872,13 +879,13 @@ async def end_process(data: dict[str, Any], ctx: "Config", **_):
         negative_parts.append(data["negative"].strip())
     if append_negative:
         negative_parts.append(append_negative)
-    
+
     # 如果没有任何负面提示词，则使用默认值
     if negative_parts:
         data["negative"] = ", ".join(negative_parts)
     else:
         data["negative"] = ctx.defaults.negative_prompt
-    
+
     # 填充其他默认值
     complete_defaults(data, ctx)
 
@@ -893,25 +900,25 @@ async def transform_req(data: dict[str, Any], **_) -> Req:
 def post_check_limits(model: Req, ctx: "Config", is_whitelisted: bool = False):
     """
     检查请求参数是否超出限制
-    
+
     Args:
         model: 请求模型
         ctx: 配置
         is_whitelisted: 用户是否在白名单中（白名单用户不受步数28和自定义尺寸限制）
     """
     w, h = [int(x) for x in model.size.split("x")]
-    
+
     # 检查是否是预设尺寸（竖图、横图、方图）
     preset_sizes = [
         ctx.defaults.portrait_size,
         ctx.defaults.landscape_size,
         ctx.defaults.square_size,
     ]
-    
+
     # 非白名单用户不能使用自定义尺寸
     if not is_whitelisted and model.size not in preset_sizes:
         raise ValueError("暂无权限使用自定义尺寸，请使用预设的竖图、横图或方图")
-    
+
     # 宽高上限检查（所有人都要遵守）
     if w > ctx.permission.width_limit or h > ctx.permission.height_limit:
         raise ValueError(
@@ -919,16 +926,14 @@ def post_check_limits(model: Req, ctx: "Config", is_whitelisted: bool = False):
         )
 
     steps = int(model.steps)
-    
+
     # 非白名单用户不能使用超过28步
     if not is_whitelisted and steps > 28:
         raise ValueError("暂无权限使用超过28步的采样步数")
-    
+
     # 步数上限检查（所有人都要遵守）
     if steps > ctx.permission.steps_limit:
-        raise ValueError(
-            f"步数超出限制 {ctx.permission.steps_limit}"
-        )
+        raise ValueError(f"步数超出限制 {ctx.permission.steps_limit}")
 
 
 USER_DEFINABLE_FIELDS = list(req_model_assembler.appliers.keys())
@@ -942,7 +947,7 @@ async def parse_req(
 ) -> Req:
     """
     解析用户输入的参数并生成请求模型
-    
+
     Args:
         raw_params: 原始参数字符串
         message: 消息组件列表（用于提取图片）
@@ -952,15 +957,15 @@ async def parse_req(
     input_params = list(parse_params(raw_params))
     images = [comp for comp in message if isinstance(comp, Image)]
     req = await req_model_assembler.apply(input_params, images, config, is_whitelisted)
-    
+
     # 进行权限检查
     post_check_limits(req, config, is_whitelisted)
-    
+
     return req
-    
+
     # 进行权限检查
     post_check_limits(req, config, is_whitelisted)
-    
+
     return req
 
 

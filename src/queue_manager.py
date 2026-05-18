@@ -2,8 +2,9 @@
 
 import asyncio
 from asyncio import Semaphore
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Literal
 
 Reason = Literal["inflight", "queue_full", "quota"]
 
@@ -66,7 +67,9 @@ class SharedQueueState:
             self.waiting_count += 1
             return ReserveResult(True, None, self.queue_count, reserved_user)
 
-    async def release(self, *, user_id: str, reserved_user: bool, max_concurrent: int) -> None:
+    async def release(
+        self, *, user_id: str, reserved_user: bool, max_concurrent: int
+    ) -> None:
         _, lock = self.ensure(max_concurrent)
         async with lock:
             if self.queue_count > 0:

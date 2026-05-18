@@ -11,7 +11,7 @@ from .character_keep_store import extract_nai_tag, replace_nai_tag
 
 
 def _split_lines_preserve(value: str) -> list[str]:
-    return [line for line in value.splitlines()]
+    return list(value.splitlines())
 
 
 def _parse_kv_with_continuation(raw: str) -> dict[str, str]:
